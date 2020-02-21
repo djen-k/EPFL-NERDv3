@@ -1,11 +1,12 @@
 import logging
 
 import libs.hvps as hvps
+from src.hvps.Switchboard import SwitchBoard
 
 
 def init_hvps(comPort):
     # instantiate and connect to HVPS
-    hvpsInst = hvps.HVPS()
+    hvpsInst = SwitchBoard()
     hvpsInfo = hvps.HvpsInfo()
     if comPort is not None:  # use com port given by user
         hvpsInfo.port = comPort

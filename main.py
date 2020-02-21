@@ -102,6 +102,7 @@ class NERD:
         self.voltage = _voltage
         self.image_cap = ImageCapture.SharedInstance
         self.hvpsInst = NERDHVPS.init_hvps(self.comport)
+        self.hvpsInst.set_relay_auto_mode()  # enable auto mode by default
         self.shutdown_flag = False
         self.time_started = None
         self.time_paused = timedelta(0)
@@ -118,6 +119,7 @@ class NERD:
         max_voltage = self.voltage
         nsteps = 10
         voltage_step = max_voltage / nsteps
+        # TODO: respect min voltage 100 V (officially 50, but doesn't always seem to work)
 
         duration_low_s = 5
         duration_high_s = 20  # 1 * 60 * 60  # 1 h = 3600 s
@@ -202,17 +204,30 @@ class NERD:
                 logging.critical("Unknown state in the state machine")
                 raise Exception
 
-            # apply new state if different and perform actions on state change
+            # apply new state if different
             if new_state is not current_state or new_step is not current_step:
-                # TODO: take pictures before applying state change
-                imgs, fits, res_imgs = self.measure_strain()
+
+                # -----------------------
+                # perform actions on state change
+                # -----------------------
+
+                # get current voltage
+                measuredVoltage = self.hvpsInst.get_current_voltage()
+
+                # get images and measure strain
+                imgs, res_imgs, fits, t_img = self.measure_strain()
 
                 # show images
                 for i in range(len(res_imgs)):
                     cv.imshow('DEA {}'.format(i), cv.resize(res_imgs[i], (0, 0), fx=0.25, fy=0.25))
 
                 # save images
-                imsaver.save_all(imgs, datetime.now(), res_imgs)  # now() is close enough, we don't care about the delay
+                # TODO: fix image naming -> (timestamp, name, suffix)
+                # TODO: why is reference at 980V ?!
+                suffix = "{}V".format(measuredVoltage)  # store voltage in file name
+                if current_state == STATE_STARTUP:
+                    suffix += " reference"  # this is the first image we're storing, so it will be the reference
+                imsaver.save_all(imgs, t_img, res_imgs, suffix)
 
                 # set voltage for new state
                 self.hvpsInst.set_voltage(current_target_voltage)
@@ -226,6 +241,9 @@ class NERD:
             # ------------------------------
             measuredVoltage = self.hvpsInst.get_current_voltage()
             self.logging.info("Current voltage: {} V".format(measuredVoltage))
+
+            deaState = self.hvpsInst.get_relay_state()
+            self.logging.info("DEA state: {}".format(deaState))
 
             # ------------------------------
             # Save applied voltage
@@ -253,13 +271,15 @@ class NERD:
     def measure_strain(self, output_result_image=True):
         cap = ImageCapture.SharedInstance
         imgs = cap.get_images()
+        # use timestamp of the last image for the whole set so they have a realistic and matching timestamp
+        timestamp = cap.get_timestamp(cap.get_camera_count() - 1)
         ellipses = [StrainDetection.dea_fit_ellipse(img) for img in imgs]  # get fit for each DEA
 
         res_imgs = None
         if output_result_image:
             res_imgs = [StrainDetection.draw_ellipse(imgs[i], ellipses[i]) for i in range(len(imgs))]
 
-        return imgs, ellipses, res_imgs
+        return imgs, res_imgs, ellipses, timestamp
 
 
 if __name__ == '__main__':
