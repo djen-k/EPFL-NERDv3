@@ -123,6 +123,7 @@ class ImageCapture:
 
                     # if callback is defined, call callback function
                     if self._new_image_callback is not None:
+                        self.logging.debug("Calling new image callback")
                         self._new_image_callback(frame.copy(), t, i - 1)  # -1 to use 0-based indexing
                 else:
                     self.logging.warning("Unable to retrieve image from camera {}. Camera will be closed.".format(i))
@@ -220,6 +221,7 @@ class ImageCapture:
 
             # if callback is defined, call callback function
             if self._new_image_callback is not None:
+                self.logging.debug("Calling new image callback")
                 self._new_image_callback(frame.copy(), self._image_timestamp[cam_id], cam_id)
         else:
             self._image_buffer[cam_id] = ImageCapture.IMG_NOT_AVAILABLE

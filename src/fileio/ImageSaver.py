@@ -28,7 +28,7 @@ class ImageSaver:
             if not os.path.exists(dir_name):
                 try:
                     os.makedirs(dir_name)
-                    self.logging.info("Directory {} Created ")
+                    self.logging.info("Directory [{}] Created ".format(dir_name))
                 except Exception as ex:
                     self.logging.critical("Failed to create image directory [{}]: {}".format(dir_name, ex))
                     raise ex
@@ -42,7 +42,7 @@ class ImageSaver:
                 if not os.path.exists(dir_name):
                     try:
                         os.makedirs(dir_name)
-                        self.logging.info("Directory {} Created ".format(dir_name))
+                        self.logging.info("Directory [{}] Created ".format(dir_name))
                     except Exception as ex:
                         self.logging.critical("Failed to create image directory [{}]: {}".format(dir_name, ex))
                         raise ex
@@ -78,7 +78,7 @@ class ImageSaver:
             suffix = " " + suffix  # prepend space, since we only want to add it if a suffix was given
 
         # save original image
-        fname = "{} {}{}.{}".format(self.dea_labels[index], suffix, t_string, ImageSaver.IMAGE_FORMAT)
+        fname = "{} {}{}.{}".format(t_string, self.dea_labels[index], suffix, ImageSaver.IMAGE_FORMAT)
         fpath = "{}/{}/{}".format(self._dirs[index], ImageSaver.IMAGE_DIR, fname)
         cv.imwrite(fpath, image)
 

@@ -36,6 +36,35 @@ class SwitchBoard(HVPS):
         res = self._parse_relay_state(self._read_hvps())
         return res
 
+    def set_voltage(self, voltage, wait=False):  # sets the output voltage
+        """
+        Sets the output voltage.
+        Checks if voltage can be set or if switchboard is currently testing for a short circuit
+        :param voltage: The desired output voltage
+        :param wait: Flag to indicate if the function should block until the voltage can be set. If false, the function
+        may return without having set the voltage. Check response from switchboard!
+        :return: True if the voltage was set successfuly, false if the switchboard was unable to set the voltage because
+        it was busy testing for a short circuit or some other error occurred. If 'wait' is true, a False return value
+        indicates an unexpected error.
+        """
+
+        if wait:
+            while self.is_testing():
+                self.logging.debug("Switchboard is busy testing for shorts. Waiting to set voltage...")
+                time.sleep(0.1)
+
+        ret = super().set_voltage(voltage)
+        return ret == voltage
+
+    def is_testing(self):
+        """
+        Checks if the switchboard is currently testing for a short circuit
+        :return: True, if the switchboard is currently busy testing
+        """
+        self.logging.debug("Query if switchbaord is testing")
+        self._write_hvps(b'QTestingShort\r')
+        return self._read_hvps() is b'1'
+
     def set_relays_on(self, relays=None):
         """
         Switch the requested relays on. If not specified, all relays are switched on.
@@ -96,11 +125,12 @@ if __name__ == '__main__':
     sb.open_hvps(hvpsInfo, with_continuous_reading=False)
 
     print(sb.get_name())
-    print("now: ", sb.get_current_voltage())
     print("sp: ", sb.get_voltage_setpoint())
-    print("set: ", sb.set_voltage(100))
-    time.sleep(1)
     print("now: ", sb.get_current_voltage())
+    # print("set: ", sb.set_voltage(500))
+    # print("sp: ", sb.get_voltage_setpoint())
+    # time.sleep(2)
+    # print("now: ", sb.get_current_voltage())
     # print(sb.set_relays_on())
     # print(sb.get_relay_state())
     print(sb.set_relay_auto_mode())
@@ -112,16 +142,20 @@ if __name__ == '__main__':
     # time.sleep(1)
     # print(sb.set_relays_off())
     time.sleep(1)
-    print("set: ", sb.set_voltage(1000))
+    print("set: ", sb.set_voltage(300))
+    print("sp: ", sb.get_voltage_setpoint())
+    # time.sleep(2)
+    # print("now: ", sb.get_current_voltage())
+    # print("sp: ", sb.get_voltage_setpoint())
     time.sleep(1)
     print("now: ", sb.get_current_voltage())
-    print("sp: ", sb.get_voltage_setpoint())
-    time.sleep(5)
     print(sb.get_relay_state())
+    time.sleep(2)
     print(sb.set_relays_off())
     time.sleep(1)
     print("set: ", sb.set_voltage(0))
-    time.sleep(2)
+    print("sp: ", sb.get_voltage_setpoint())
+    time.sleep(1)
     print("now: ", sb.get_current_voltage())
     print("sp: ", sb.get_voltage_setpoint())
     sb.close()

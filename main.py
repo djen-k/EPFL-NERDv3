@@ -2,11 +2,13 @@ import logging
 import logging.config
 import sys
 from datetime import datetime, timedelta
+import numpy as np
 
 import cv2 as cv
 from PyQt5.QtWidgets import QMainWindow, QWidget, QVBoxLayout, QApplication, QInputDialog
 
 from libs import duallog
+from src.fileio.DataSaver import DataSaver
 from src.fileio.ImageSaver import ImageSaver
 from src.fileio.config import read_config, write_config
 from src.gui import SetupDialog
@@ -62,21 +64,23 @@ def _setup(_comport, _camorder, _voltage):
     config_file_name = "config.txt"
 
     try:
-        _comport, _camorder = read_config(config_file_name)
+        _comport, _camorder, _voltage = read_config(config_file_name)
         logging.info("Read config file")
     except Exception:
         logging.warning("Unable to read config file")
 
     # Show setup dialog to get COM port and camera order
-    setup_dialog = SetupDialog.SetupDialog(com_port_default=_comport, cam_order_default=_camorder)
+    setup_dialog = SetupDialog.SetupDialog(com_port_default=_comport, cam_order_default=_camorder,
+                                           voltage_default=_voltage)
 
     if setup_dialog.exec_():
-        _comport, _camorder = setup_dialog.get_results()
+        _comport, _camorder, _voltage = setup_dialog.get_results()
         logging.info("User selection for HVPS COM port: {}".format(_comport))
+        logging.info("Test voltage set to {} V".format(_voltage))
         logging.info("User selection for cam order: {}".format(_camorder))
 
         try:
-            write_config(config_file_name, _comport, _camorder)
+            write_config(config_file_name, _comport, _camorder, _voltage)
             logging.info("Wrote config file")
         except Exception:
             logging.warning("Unable to write config file")
@@ -84,13 +88,55 @@ def _setup(_comport, _camorder, _voltage):
         logging.critical("No COM port or cam order selected")
         raise Exception("No COM port or cam order selected")
 
-    _voltage, okPressed = QInputDialog.getInt(None, "Test voltage", "Voltage:", _voltage, 0, 5000, 1)
-    if not okPressed:
-        raise Exception("No test voltage specified")
-
-    logging.info("Test voltage set to {} V".format(_voltage))
-
     return _comport, _camorder, _voltage
+
+
+def decompose_ellipses(ellipses):
+    centers = []
+    radii = []
+    angles = []
+    for el in ellipses:
+        centers.append(el[0])
+        radii.append(el[1])
+        angles.append(el[2])
+
+    return np.array(centers), np.array(radii), np.array(angles)
+
+
+def ellipse_radius_at_angle(radii, ellipse_angle, query_angle):
+    """
+    Calculate the radius of a given ellipse at the specified angle.
+    :param radii: n-by-2 array of radii (a, b) for each of n ellipses
+    :param ellipse_angle: n-by-1 array of angles for each of n ellipses (in deg, from x-axis to first ellipse axis)
+    :param query_angle: 1-by-m array of angles (in deg) for which to calculate the radii
+    :return: n-by-m array of radii for the given ellipses at the specified angles
+    """
+
+    # ensure that all arrays have the right dimensions
+    radii = np.reshape(radii, (-1, 2))
+    ellipse_angle = np.reshape(ellipse_angle, (-1, 1))
+    query_angle = np.reshape(query_angle, (1, -1))
+
+    # calculate radii
+    a = np.deg2rad(query_angle - ellipse_angle)
+    prod = np.prod(radii, 1, keepdims=True)
+    sqr_sum = np.sqrt((radii[:, None, 0] * np.sin(a)) ** 2 + (radii[:, None, 1] * np.cos(a)) ** 2)  # None to keep dims
+
+    return prod / sqr_sum
+
+
+def get_ellipse_fits(output_result_image=True):
+    cap = ImageCapture.SharedInstance
+    imgs = cap.get_images()
+    # use timestamp of the last image for the whole set so they have a realistic and matching timestamp
+    timestamp = cap.get_timestamp(cap.get_camera_count() - 1)
+    ellipses = [StrainDetection.dea_fit_ellipse(img) for img in imgs]  # get fit for each DEA
+
+    res_imgs = None
+    if output_result_image:
+        res_imgs = [StrainDetection.draw_ellipse(imgs[i], ellipses[i]) for i in range(len(imgs))]
+
+    return imgs, res_imgs, ellipses, timestamp
 
 
 class NERD:
@@ -106,25 +152,36 @@ class NERD:
         self.shutdown_flag = False
         self.time_started = None
         self.time_paused = timedelta(0)
+        self.reference_radii = None
+        self.reference_center = None
+        self.reference_angles = None
 
     def run_nogui(self):
         self.logging.info("Running NERD protocol in main thread without dedicated GUI "
                           "(using openCV windows for visual output")
 
         # create an image saver for this session to store the recorded images
-        dir_name = "output/NERD test {}".format(datetime.now().strftime("%Y%m%d-%H%M%S"))
+        session_name = "NERD test {}".format(datetime.now().strftime("%Y%m%d-%H%M%S"))
+        dir_name = "output/{}".format(session_name)
+
         imsaver = ImageSaver(dir_name, 6, save_result_images=True)
+
+        # TODO: handle varying numbers of DEAs
+        save_file_name = "{}/{} data.csv".format(dir_name, session_name)
+        saver = DataSaver(6, save_file_name)
 
         # get settings/values from user
         max_voltage = self.voltage
+        min_voltage = 300
+        # TODO: check why min voltage is 300 V (officially 50, but doesn't always seem to work)
         nsteps = 10
         voltage_step = max_voltage / nsteps
-        # TODO: respect min voltage 100 V (officially 50, but doesn't always seem to work)
 
         duration_low_s = 5
-        duration_high_s = 20  # 1 * 60 * 60  # 1 h = 3600 s
+        duration_high_s = 1 * 60 * 60  # 1 h = 3600 s
         step_duration_s = 5
         update_period_s = 1
+        image_capture_period = 60
 
         # prepare / compute what we need before applying voltage
         current_target_voltage = 0
@@ -142,7 +199,8 @@ class NERD:
         # record start time
         t = datetime.now()
         self.time_started = t
-        last_state_change_time = t
+        time_last_state_change = t
+        time_last_image_taken = t
         start_pause_time = t
         last_image_time = t
 
@@ -159,16 +217,16 @@ class NERD:
             if current_state == STATE_STARTUP:
                 self.logging.info("Starting up state machine")
             elif current_state == STATE_WAITING_LOW:
-                msg = "waiting low: {:.0f}/{}s".format((now - last_state_change_time).total_seconds(), duration_low_s)
+                msg = "waiting low: {:.0f}/{}s".format((now - time_last_state_change).total_seconds(), duration_low_s)
                 self.logging.info(msg)
             elif current_state == STATE_STEPPING:
-                dt = (now - last_state_change_time).total_seconds()
+                dt = (now - time_last_state_change).total_seconds()
                 msg = "Step {}/{}, current voltage: {} V, next step in {:.0f}/{} s"
                 msg = msg.format(current_step, nsteps, current_target_voltage, dt, step_duration_s)
                 self.logging.info(msg)
             elif current_state == STATE_WAITING_HIGH:
                 msg = "Waiting high: {:.0f}/{} s"
-                msg = msg.format((now - last_state_change_time).total_seconds(), duration_high_s)
+                msg = msg.format((now - time_last_state_change).total_seconds(), duration_high_s)
                 self.logging.info(msg)
             else:
                 logging.critical("Unknown state in the state machine")
@@ -181,63 +239,45 @@ class NERD:
 
             new_state = current_state  # if nothing happens in the following conditions, we keep current state and step
             new_step = current_step
-            dt_state_change = (now - last_state_change_time).total_seconds()  # time since last state change
+            new_target_voltage = current_target_voltage
+            dt_state_change = (now - time_last_state_change).total_seconds()  # time since last state change
             if current_state == STATE_STARTUP:
                 new_state = STATE_WAITING_LOW
             elif current_state == STATE_WAITING_LOW:
                 if dt_state_change > duration_low_s:
                     new_state = STATE_STEPPING
-                    new_step = 1  # first step
-                    current_target_voltage = round(voltage_step)
+                    new_step = 0  # reset steps
+                    while new_target_voltage < min_voltage:
+                        new_step += 1  # increase step
+                        new_target_voltage = round(new_step * voltage_step)
             elif current_state == STATE_STEPPING:
                 if dt_state_change > step_duration_s:
                     new_step = current_step + 1
-                    current_target_voltage = round(new_step * voltage_step)
+                    new_target_voltage = round(new_step * voltage_step)
                     if new_step > nsteps:
                         new_state = STATE_WAITING_HIGH
-                        current_target_voltage = max_voltage
+                        new_target_voltage = max_voltage
             elif current_state == STATE_WAITING_HIGH:
                 if dt_state_change > duration_high_s:
                     new_state = STATE_WAITING_LOW
-                    current_target_voltage = 0
+                    new_target_voltage = 0
             else:
                 logging.critical("Unknown state in the state machine")
                 raise Exception
 
-            # apply new state if different
-            if new_state is not current_state or new_step is not current_step:
-
-                # -----------------------
-                # perform actions on state change
-                # -----------------------
-
-                # get current voltage
-                measuredVoltage = self.hvpsInst.get_current_voltage()
-
-                # get images and measure strain
-                imgs, res_imgs, fits, t_img = self.measure_strain()
-
-                # show images
-                for i in range(len(res_imgs)):
-                    cv.imshow('DEA {}'.format(i), cv.resize(res_imgs[i], (0, 0), fx=0.25, fy=0.25))
-
-                # save images
-                # TODO: fix image naming -> (timestamp, name, suffix)
-                # TODO: why is reference at 980V ?!
-                suffix = "{}V".format(measuredVoltage)  # store voltage in file name
-                if current_state == STATE_STARTUP:
-                    suffix += " reference"  # this is the first image we're storing, so it will be the reference
-                imsaver.save_all(imgs, t_img, res_imgs, suffix)
-
-                # set voltage for new state
-                self.hvpsInst.set_voltage(current_target_voltage)
-
-                current_state = new_state
-                current_step = new_step
-                last_state_change_time = datetime.now()
+            # check what actions need to happen this cycle
+            state_changing = new_state is not current_state or new_step is not current_step
+            if state_changing:
+                self.logging.debug("State changeing from {} (step {}) to {} (step {})".format(current_state,
+                                                                                              current_step,
+                                                                                              new_state, new_step))
+            dt_image_taken = (now - time_last_image_taken).total_seconds()  # time since last state change
+            image_required = dt_image_taken > image_capture_period
+            self.logging.debug("Time since last image: {} s,  New image required: {}".format(dt_image_taken,
+                                                                                             image_required))
 
             # ------------------------------
-            # HVPS feedback and plots
+            # Record voltage and DEA state
             # ------------------------------
             measuredVoltage = self.hvpsInst.get_current_voltage()
             self.logging.info("Current voltage: {} V".format(measuredVoltage))
@@ -245,10 +285,59 @@ class NERD:
             deaState = self.hvpsInst.get_relay_state()
             self.logging.info("DEA state: {}".format(deaState))
 
+            strain = None
+            center_shifts = None
+            if state_changing or image_required:
+
+                # -----------------------
+                # record, analyze, and store images
+                # -----------------------
+
+                # get images and fit ellipses
+                imgs, res_imgs, fits, t_img = get_ellipse_fits()
+
+                # calculate strain and center shift
+                strain, center_shifts = self.calculate_strain(fits)
+
+                # print average strain for each DEA
+                self.logging.info("strain: {}".format(np.reshape(np.mean(strain, 1), (1, -1))))
+
+                # save images
+                suffix = "{}V".format(measuredVoltage)  # store voltage in file name
+                if current_state == STATE_STARTUP:
+                    suffix += " reference"  # this is the first image we're storing, so it will be the reference
+                # use now instead of t_img to make sure we have consistent timestamp for all data recorded in this cycle
+                imsaver.save_all(imgs, now, res_imgs, suffix)
+                time_last_image_taken = now
+
+                # -----------------------
+                # show images
+                # -----------------------
+
+                for i in range(len(res_imgs)):
+                    cv.imshow('DEA {}'.format(i), cv.resize(res_imgs[i], (0, 0), fx=0.25, fy=0.25))
+
             # ------------------------------
-            # Save applied voltage
+            # Save all data voltage and DEA state
             # ------------------------------
-            # TODO: save (current_target_voltage, measuredVoltage)
+            # todo: write elapsed time in seconds to output file
+            # todo compute total time at max voltage
+            saver.write_data(now, current_target_voltage, measuredVoltage, deaState, strain, center_shifts)
+
+            # ------------------------------
+            # Apply state change and update voltage
+            # ------------------------------
+            if state_changing:
+                # set voltage for new state
+                current_target_voltage = new_target_voltage
+                ret = self.hvpsInst.set_voltage(current_target_voltage, wait=True)
+                if ret is not True:
+                    self.logging.debug("Failed to set voltage")
+
+                current_state = new_state
+                current_step = new_step
+                time_last_state_change = datetime.now()
+                time_last_image_taken = time_last_state_change  # also reset image timer to avoid taking too many
 
             # ------------------------------
             # Keep track of voltage changes
@@ -264,22 +353,31 @@ class NERD:
             if cv.waitKey(update_period_s * 1000) & 0xFF == ord('q'):
                 self.shutdown_flag = True
 
+        self.logging.critical("Exiting...")
         self.hvpsInst.set_output_off()
-        self.hvpsInst.set_voltage(0)
-        self.logging.critical("apply voltage quit")
+        self.hvpsInst.set_voltage(0, wait=True)
+        del self.hvpsInst
+        self.logging.critical("Turned voltage off and disconnected relays")
+        saver.close()
+        self.image_cap.close_cameras()
 
-    def measure_strain(self, output_result_image=True):
-        cap = ImageCapture.SharedInstance
-        imgs = cap.get_images()
-        # use timestamp of the last image for the whole set so they have a realistic and matching timestamp
-        timestamp = cap.get_timestamp(cap.get_camera_count() - 1)
-        ellipses = [StrainDetection.dea_fit_ellipse(img) for img in imgs]  # get fit for each DEA
+    def calculate_strain(self, ellipses):
+        # TODO: move to StrainDetection
+        # calculate strain and center shift
+        centers, el_radii, angles = decompose_ellipses(ellipses)  # get as numpy arrays
 
-        res_imgs = None
-        if output_result_image:
-            res_imgs = [StrainDetection.draw_ellipse(imgs[i], ellipses[i]) for i in range(len(imgs))]
+        xy_radii = ellipse_radius_at_angle(el_radii, angles, np.array([0, 90]))
 
-        return imgs, res_imgs, ellipses, timestamp
+        # if there is not yet any reference for strain measurements, set these ellipses as the reference
+        if self.reference_radii is None:
+            self.reference_radii = xy_radii
+            self.reference_center = centers
+            self.logging.info("Setting new strain reference")
+
+        strain = xy_radii / self.reference_radii
+        center_shift = centers - self.reference_center
+
+        return strain, center_shift
 
 
 if __name__ == '__main__':

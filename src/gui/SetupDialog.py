@@ -15,7 +15,7 @@ class SetupDialog(QtWidgets.QDialog):
     This class is a dialog window asking the user to select a COM port and assign a camera to each DEA
     """
 
-    def __init__(self, parent=None, com_port_default=None, cam_order_default=None):
+    def __init__(self, parent=None, com_port_default=None, cam_order_default=None, voltage_default=None):
         super(SetupDialog, self).__init__(parent)
         # Create logger
         self.logging = logging.getLogger("SetupDialog")
@@ -67,6 +67,15 @@ class SetupDialog(QtWidgets.QDialog):
                     break
         else:  # no default --> pick first one
             self.cbb_port_name.setCurrentIndex(0)
+
+        # create voltage selector
+        self.num_voltage = QtWidgets.QSpinBox()
+        self.num_voltage.setMinimum(100)
+        self.num_voltage.setMaximum(5000)
+        voltage = 1000
+        if voltage_default is not None:
+            voltage = voltage_default
+        self.num_voltage.setValue(voltage)
 
         # create grid layout to show all the images
         gridLay = QtWidgets.QGridLayout()
@@ -138,6 +147,15 @@ class SetupDialog(QtWidgets.QDialog):
         separator.setFrameShadow(QtWidgets.QFrame.Sunken)
         mainLay.addWidget(separator)
 
+        mainLay.addWidget(QtWidgets.QLabel("Please specify the desired test voltage"))
+        mainLay.addWidget(self.num_voltage, alignment=Qt.AlignLeft)
+
+        # add a separator between COM selection and camera images
+        separator = QtWidgets.QFrame()
+        separator.setFrameShape(QtWidgets.QFrame.HLine)
+        separator.setFrameShadow(QtWidgets.QFrame.Sunken)
+        mainLay.addWidget(separator)
+
         mainLay.addWidget(QtWidgets.QLabel("Select the camera to use for each DEA. Make sure the images are sharp "
                                            "and that the DEAs are centered in the images"))
         mainLay.addLayout(gridLay)
@@ -147,7 +165,13 @@ class SetupDialog(QtWidgets.QDialog):
         # self.setWindowFlags(Qt.Window)
         self.show()
 
+        # register callback to receive an image immediately when a camera is found
+        ImageCapture.SharedInstance.set_new_image_callback(self.new_image_callback)
+        self.logging.debug("Registered callback")
+        self.logging.debug("Init image capture...")
         self.btnCaptureClicked()  # captures images and updates the labels
+        ImageCapture.SharedInstance.set_new_image_callback(None)  # de-register so it doesn't get refreshed twice
+        self.logging.debug("Unregistered callback")
 
     def btnAdjustClicked(self):
         self.logging.debug("clicked adjust")
@@ -240,6 +264,11 @@ class SetupDialog(QtWidgets.QDialog):
         if img_size is None:
             img_size = self._default_img_size
         self.lbl_image[i_dea].setPixmap(QtImageTools.conv_Qt(opencv_image, img_size))
+        self.logging.debug("Set new image for DEA {}".format(i_dea+1))
+        self.repaint()
+
+    def new_image_callback(self, image, timestamp, cam_id):
+        self.setImage(cam_id, image)
 
     def btnCaptureClicked(self):
         self._image_capture.read_images()
@@ -298,7 +327,7 @@ class SetupDialog(QtWidgets.QDialog):
 
     def get_results(self):
         # return values of fields when OK
-        return self.cbb_port_name.currentText(), self.getCamOrder()  # , self.initial_images, self.mesh_coordinates
+        return self.cbb_port_name.currentText(), self.getCamOrder(), self.num_voltage.value()
 
     def updateImage(self, image, timestamp, cam_id):
 
@@ -358,9 +387,3 @@ class SetupDialog(QtWidgets.QDialog):
         #         self.lbl_image[i_dea].setPixmap(QtImageTools.conv_Qt(ImageCapture.IMG_NOT_AVAILABLE, self._default_img_size))
         #     else:
         #         self.lbl_image[i_dea].setPixmap(QtImageTools.conv_Qt(images[i_cam], self._default_img_size))
-
-    def paintEvent(self, a0: QtGui.QPaintEvent) -> None:
-        try:
-            super(SetupDialog, self).paintEvent(a0)
-        except Exception as ex:
-            self.logging.error("Exception in CamerSelection.paintEvent: {}".format(ex))
