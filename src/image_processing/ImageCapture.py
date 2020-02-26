@@ -223,8 +223,9 @@ class ImageCapture:
         if suc:  # only retrieve if last grab was successful
             suc, frame = cam.retrieve()  # retrieve frame previously captured by "grab()"
 
+        self._image_buffer[cam_id] = frame
+
         if suc:
-            self._image_buffer[cam_id] = frame
             self._image_timestamp[cam_id] = self._grab_timestamp[cam_id]  # update the timestamp
 
             self.logging.debug("Retrieved frame from camera {}. Size: {}".format(cam_id, frame.shape))
@@ -234,7 +235,6 @@ class ImageCapture:
                 self.logging.debug("Calling new image callback")
                 self._new_image_callback(frame.copy(), self._image_timestamp[cam_id], cam_id)
         else:
-            self._image_buffer[cam_id] = ImageCapture.IMG_NOT_AVAILABLE
             self.logging.warning("Unable to retrieve frame from camera {}".format(cam_id))
 
     def retrieve_images(self):

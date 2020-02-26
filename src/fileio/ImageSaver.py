@@ -72,6 +72,10 @@ class ImageSaver:
             self.logging.info("Saved strain detection result images for {} DEAs".format(self.n_deas))
 
     def save_image(self, index, image, timestamp: datetime, res_image=None, suffix=None):
+        if image is None:
+            self.logging.debug("No image to save for DEA {}".format(index))
+            return
+
         t_string = timestamp.strftime("%Y%m%d-%H%M%S")  # get formatted time stamp to put in file name
 
         if suffix is not None:

@@ -97,9 +97,14 @@ def decompose_ellipses(ellipses):
     radii = []
     angles = []
     for el in ellipses:
-        centers.append(el[0])
-        radii.append(el[1])
-        angles.append(el[2])
+        if el is None:
+            centers.append((np.nan, np.nan))
+            radii.append((np.nan, np.nan))
+            angles.append(np.nan)
+        else:
+            centers.append(el[0])
+            radii.append(el[1])
+            angles.append(el[2])
 
     return np.array(centers), np.array(radii), np.array(angles)
 
@@ -324,7 +329,11 @@ class NERD:
                 # -----------------------
 
                 for i in range(len(res_imgs)):
-                    cv.imshow('DEA {}'.format(i), cv.resize(res_imgs[i], (0, 0), fx=0.25, fy=0.25))
+                    if res_imgs[i] is None:
+                        cv.imshow('DEA {}'.format(i), cv.resize(ImageCapture.ImageCapture.IMG_NOT_AVAILABLE, (0, 0),
+                                                                fx=0.25, fy=0.25))
+                    else:
+                        cv.imshow('DEA {}'.format(i), cv.resize(res_imgs[i], (0, 0), fx=0.25, fy=0.25))
 
             # ------------------------------
             # Save all data voltage and DEA state

@@ -185,7 +185,7 @@ def dea_fit_ellipse(img, closing_radius=5):
 
     # if lengths still don't match, we have a problem!
     if len(i_start) != len(i_end):
-        raise ValueError("can't match start and end of indluded regions")
+        raise ValueError("can't match start and end of included regions")
     if len(i_start) != 3:
         warning("Expected 3 contour regions to include. Found: {}".format(len(i_start)))
 
