@@ -49,12 +49,16 @@ class ImageSaver:
                 else:
                     self.logging.debug("Directory [{}] already exists".format(dir_name))
 
-    def save_all(self, images, timestamp=None, res_images=None, suffix=None):
+    def save_all(self, images=None, timestamp=None, res_images=None, suffix=None):
         # make sure we have a reasonable timestamp for each image
         if timestamp is None:
             timestamp = datetime.now()
         if not isinstance(timestamp, list):
             timestamp = [timestamp] * self.n_deas
+
+        # if no images, make them into a list of Nones so they are easier to pass to the save method
+        if images is None:
+            images = [None] * self.n_deas
 
         # if no res images, make them into a list of Nones so they are easier to pass to the save method
         if res_images is None:
@@ -71,9 +75,9 @@ class ImageSaver:
         if res_images[0] is not None:
             self.logging.info("Saved strain detection result images for {} DEAs".format(self.n_deas))
 
-    def save_image(self, index, image, timestamp: datetime, res_image=None, suffix=None):
-        if image is None:
-            self.logging.debug("No image to save for DEA {}".format(index))
+    def save_image(self, index, image=None, timestamp=None, res_image=None, suffix=None):
+        if image is None and res_image is None:
+            self.logging.warning("No images to save for DEA {}".format(index))
             return
 
         t_string = timestamp.strftime("%Y%m%d-%H%M%S")  # get formatted time stamp to put in file name
@@ -82,9 +86,12 @@ class ImageSaver:
             suffix = " " + suffix  # prepend space, since we only want to add it if a suffix was given
 
         # save original image
-        fname = "{} {}{}.{}".format(t_string, self.dea_labels[index], suffix, ImageSaver.IMAGE_FORMAT)
-        fpath = "{}/{}/{}".format(self._dirs[index], ImageSaver.IMAGE_DIR, fname)
-        cv.imwrite(fpath, image)
+        if image is not None:
+            fname = "{} {}{}.{}".format(t_string, self.dea_labels[index], suffix, ImageSaver.IMAGE_FORMAT)
+            fpath = "{}/{}/{}".format(self._dirs[index], ImageSaver.IMAGE_DIR, fname)
+            cv.imwrite(fpath, image)
+        else:
+            self.logging.warning("No original image supplied")
 
         # save result image
         if self.save_result_images:

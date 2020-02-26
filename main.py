@@ -131,18 +131,14 @@ def ellipse_radius_at_angle(radii, ellipse_angle, query_angle):
     return prod / sqr_sum
 
 
-def get_ellipse_fits(output_result_image=True):
-    cap = ImageCapture.SharedInstance
-    imgs = cap.get_images()
-    # use timestamp of the last image for the whole set so they have a realistic and matching timestamp
-    timestamp = cap.get_timestamp(cap.get_camera_count() - 1)
+def get_ellipse_fits(imgs, output_result_image=True):
     ellipses = [StrainDetection.dea_fit_ellipse(img) for img in imgs]  # get fit for each DEA
 
     res_imgs = None
     if output_result_image:
         res_imgs = [StrainDetection.draw_ellipse(imgs[i], ellipses[i]) for i in range(len(imgs))]
 
-    return imgs, res_imgs, ellipses, timestamp
+    return ellipses, res_imgs
 
 
 class NERD:
@@ -307,8 +303,25 @@ class NERD:
                 # record, analyze, and store images
                 # -----------------------
 
-                # get images and fit ellipses
-                imgs, res_imgs, fits, t_img = get_ellipse_fits()
+                # get images
+                cap = ImageCapture.SharedInstance
+                imgs = cap.get_images()
+                # use timestamp of the last image for the whole set so they have a realistic and matching timestamp
+                timestamp = cap.get_timestamp(cap.get_camera_count() - 1)
+
+                # get image name suffix
+                suffix = "{}V".format(measuredVoltage)  # store voltage in file name
+                if current_state == STATE_STARTUP:
+                    suffix += " reference"  # this is the first image we're storing, so it will be the reference
+
+                # save images first so if strain detection fails, we can check the image that caused the failure
+                imsaver.save_all(images=imgs, timestamp=now, suffix=suffix)
+
+                # fit ellipses
+                fits, res_imgs = get_ellipse_fits(imgs)
+
+                # save result images
+                imsaver.save_all(res_images=res_imgs, timestamp=now, suffix=suffix)
 
                 # calculate strain and center shift
                 strain, center_shifts = self.calculate_strain(fits)
@@ -316,12 +329,7 @@ class NERD:
                 # print average strain for each DEA
                 self.logging.info("strain: {}".format(np.reshape(np.mean(strain, 1), (1, -1))))
 
-                # save images
-                suffix = "{}V".format(measuredVoltage)  # store voltage in file name
-                if current_state == STATE_STARTUP:
-                    suffix += " reference"  # this is the first image we're storing, so it will be the reference
                 # use now instead of t_img to make sure we have consistent timestamp for all data recorded in this cycle
-                imsaver.save_all(imgs, now, res_imgs, suffix)
                 time_last_image_taken = now
 
                 # -----------------------
