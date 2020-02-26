@@ -1,11 +1,12 @@
 import logging
 import logging.config
 import sys
+import time
 from datetime import datetime, timedelta
-import numpy as np
 
 import cv2 as cv
-from PyQt5.QtWidgets import QMainWindow, QWidget, QVBoxLayout, QApplication, QInputDialog
+import numpy as np
+from PyQt5.QtWidgets import QMainWindow, QWidget, QVBoxLayout, QApplication
 
 from libs import duallog
 from src.fileio.DataSaver import DataSaver
@@ -147,6 +148,8 @@ class NERD:
         self.camorder = _camorder
         self.voltage = _voltage
         self.image_cap = ImageCapture.SharedInstance
+        # TODO: implement robust system for getting number of DEAs and dealing with unexpected number of images etc.
+        self.n_dea = self.image_cap.get_camera_count()  # this works if we previously selected the cameras
         self.hvpsInst = NERDHVPS.init_hvps(self.comport)
         self.hvpsInst.set_relay_auto_mode()  # enable auto mode by default
         self.shutdown_flag = False
@@ -157,18 +160,18 @@ class NERD:
         self.reference_angles = None
 
     def run_nogui(self):
-        self.logging.info("Running NERD protocol in main thread without dedicated GUI "
-                          "(using openCV windows for visual output")
+        self.logging.info("Running NERD protocol with {} DEAs in main thread without dedicated GUI "
+                          "(using openCV windows for visual output".format(self.n_dea))
 
         # create an image saver for this session to store the recorded images
         session_name = "NERD test {}".format(datetime.now().strftime("%Y%m%d-%H%M%S"))
         dir_name = "output/{}".format(session_name)
 
-        imsaver = ImageSaver(dir_name, 6, save_result_images=True)
+        imsaver = ImageSaver(dir_name, self.n_dea, save_result_images=True)
 
         # TODO: handle varying numbers of DEAs
         save_file_name = "{}/{} data.csv".format(dir_name, session_name)
-        saver = DataSaver(6, save_file_name)
+        saver = DataSaver(self.n_dea, save_file_name)
 
         # get settings/values from user
         max_voltage = self.voltage
@@ -216,6 +219,12 @@ class NERD:
             # ------------------------------
             if current_state == STATE_STARTUP:
                 self.logging.info("Starting up state machine")
+                # wait for voltage to be 0 (in case it wasn't at start and needs time to decay)
+                measuredVoltage = self.hvpsInst.get_current_voltage()
+                while measuredVoltage > 0:
+                    self.logging.warning("Current voltage is {}. Waiting for it to decay to 0.".format(measuredVoltage))
+                    time.sleep(0.1)
+                    measuredVoltage = self.hvpsInst.get_current_voltage()
             elif current_state == STATE_WAITING_LOW:
                 msg = "waiting low: {:.0f}/{}s".format((now - time_last_state_change).total_seconds(), duration_low_s)
                 self.logging.info(msg)
@@ -394,8 +403,8 @@ if __name__ == '__main__':
 
     # run setup
     com_port, cam_order, voltage = _setup(com_port, cam_order, voltage)
-    ImageCapture.SharedInstance.select_cameras(
-        cam_order)  # apply cam order to image capture so we can just address them as
+    # apply cam order to image capture so we can just address them as cam 0, 1, 2, ...
+    ImageCapture.SharedInstance.select_cameras(cam_order)
 
     nerd = NERD(com_port, cam_order, voltage)
     nerd.run_nogui()

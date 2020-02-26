@@ -23,6 +23,7 @@ class ImageCapture:
         self._new_set_callback = None
         self._exit_flag = None
         self._capture_thread = None
+        self._grab_ok = []
 
     def _reset(self):
         self.close_cameras()
@@ -32,6 +33,7 @@ class ImageCapture:
         self._image_buffer = []
         self._grab_timestamp = []  # timestamp for the last grab
         self._image_timestamp = []  # timestamps for images in buffer. May differ from grab_timestamp if retrieve failed
+        self._grab_ok = []
 
     def set_new_image_callback(self, new_image_callback):
         """
@@ -119,6 +121,7 @@ class ImageCapture:
                     t = datetime.now()
                     self._grab_timestamp.append(t)
                     self._image_timestamp.append(t)
+                    self._grab_ok.append(True)
                     self._camera_count = i
 
                     # if callback is defined, call callback function
@@ -148,7 +151,7 @@ class ImageCapture:
             if cid >= self._camera_count:
                 self.logging.critical("Invalid camera selected: camera {} is not available!".format(cid))
                 raise ValueError("Invalid camera selection!")
-            else:
+            elif cid >= 0:  # if -1, the camera is not used so we don't need to do anything
                 cams.append(self._cameras[cid])
                 names.append(self._camera_names[cid])
                 images.append(self._image_buffer[cid])
@@ -189,6 +192,9 @@ class ImageCapture:
         else:
             self.logging.warning("Unable to grab frame from camera {}".format(self._cameras.index(cam)))
 
+        self._grab_ok[cam_id] = suc
+        return suc
+
     def grab_images(self):
         """
         Grab a frame from each selected camera. Only grab is performed and no image is retrieved at this point.
@@ -212,7 +218,11 @@ class ImageCapture:
             self.logging.debug("Camera {} is not open".format(self._cameras.index(cam)))
             return
 
-        suc, frame = cam.retrieve()  # retrieve frame previously captured by "grab()"
+        suc = self._grab_ok[cam_id]
+        frame = None
+        if suc:  # only retrieve if last grab was successful
+            suc, frame = cam.retrieve()  # retrieve frame previously captured by "grab()"
+
         if suc:
             self._image_buffer[cam_id] = frame
             self._image_timestamp[cam_id] = self._grab_timestamp[cam_id]  # update the timestamp

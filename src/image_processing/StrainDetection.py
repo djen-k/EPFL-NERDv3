@@ -131,6 +131,9 @@ def approximate_electrode_area(img_bw, iterations=10, center=None):
 
 
 def dea_fit_ellipse(img, closing_radius=5):
+    if img is None:
+        return None
+
     img_orig = np.copy(img)  # keep copy of original image
 
     # binarize
@@ -211,6 +214,8 @@ def dea_fit_ellipse(img, closing_radius=5):
 
 
 def draw_ellipse(img, ellipse):
+    if img is None:
+        return None
     img = np.copy(img)  # copy so we don't alter the original
     cv.ellipse(img, ellipse, (255, 0, 0), 2)
     return img

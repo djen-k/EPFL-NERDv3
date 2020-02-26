@@ -1,8 +1,6 @@
 import csv
-import os
-import time
 import logging
-from datetime import datetime
+import os
 
 
 class DataSaver:
@@ -62,7 +60,8 @@ class DataSaver:
         data["measured_voltage"] = measured_voltage
         if strain is not None:
             data["imagefile"] = timestamp.strftime("%Y%m%d-%H%M%S")  # same as in image file name, to help find it
-        for i in range(len(dea_state)):
+            # TODO: create option to choose channels (e.g. use only channels 1, 2, 5, 6)
+        for i in range(self.nbDea):
             data["DEA{}_state".format(i)] = dea_state[i]
             if resistance is not None:
                 data["DEA{}_resistance".format(i)] = resistance[i]
