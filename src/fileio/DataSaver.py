@@ -39,6 +39,7 @@ class DataSaver:
             self.dataFields.append("DEA{}_center_X".format(i))
             self.dataFields.append("DEA{}_center_Y".format(i))
 
+        self.dataFields.append("test_state")
         self.dataFields.append("imagefile")
 
         # init values with None
@@ -50,7 +51,7 @@ class DataSaver:
         self.logging.debug("write headers")
         self.file.flush()
 
-    def write_data(self, timestamp, target_voltage, measured_voltage, dea_state,
+    def write_data(self, timestamp, target_voltage, measured_voltage, dea_state, test_state,
                    strain=None, center_shift=None, resistance=None):
 
         data = self.getDictField()
@@ -58,6 +59,7 @@ class DataSaver:
         data["timestamp"] = timestamp.strftime("%d/%m/%Y %H:%M:%S")  # formatted to be interpretable by Excel
         data["target_voltage"] = target_voltage
         data["measured_voltage"] = measured_voltage
+        data["test_state"] = test_state
         if strain is not None:
             data["imagefile"] = timestamp.strftime("%Y%m%d-%H%M%S")  # same as in image file name, to help find it
             # TODO: create option to choose channels (e.g. use only channels 1, 2, 5, 6)

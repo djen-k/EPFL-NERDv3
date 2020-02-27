@@ -348,7 +348,8 @@ class NERD:
             # ------------------------------
             # todo: write elapsed time in seconds to output file
             # todo compute total time at max voltage
-            saver.write_data(now, current_target_voltage, measuredVoltage, deaState, strain, center_shifts)
+            saver.write_data(now, current_target_voltage, measuredVoltage, deaState,
+                             current_state, strain, center_shifts)
 
             # ------------------------------
             # Apply state change and update voltage
