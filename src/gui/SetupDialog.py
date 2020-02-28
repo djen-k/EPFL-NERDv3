@@ -2,7 +2,7 @@ import logging
 import math
 
 import cv2
-from PyQt5 import QtWidgets, QtSerialPort, QtGui
+from PyQt5 import QtWidgets, QtSerialPort
 from PyQt5.QtCore import Qt
 
 from src.gui import QtImageTools
@@ -256,7 +256,7 @@ class SetupDialog(QtWidgets.QDialog):
                         pass
                     self.setImage(i_dea, img)
                 else:
-                    self.setImage(i_dea, self._image_capture.get_single_image_from_buffer(i_cam))
+                    self.setImage(i_dea, self._image_capture.get_images_from_buffer()[i_cam])
             else:
                 self.setImage(i_dea, ImageCapture.ImageCapture.IMG_NOT_AVAILABLE)
 
@@ -268,11 +268,10 @@ class SetupDialog(QtWidgets.QDialog):
         self.repaint()
 
     def new_image_callback(self, image, timestamp, cam_id):
-        self.setImage(cam_id, image)
+        self.setImage(int(cam_id[-1]), image)
 
     def btnCaptureClicked(self):
-        self._image_capture.read_images()
-        self.updateImages(self._image_capture.get_images_from_buffer(), self._image_capture.get_timestamps())
+        self.updateImages(self._image_capture.read_images(), self._image_capture.get_timestamps())
 
     def btnNextClicked(self):
         print("next")

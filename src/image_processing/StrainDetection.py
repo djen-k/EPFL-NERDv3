@@ -1,4 +1,4 @@
-from logging import warning
+import logging
 
 import cv2 as cv
 import numpy as np
@@ -50,7 +50,7 @@ def find_contour(bw, center=None):
         if cv.pointPolygonTest(cnt, center, False) == 1:
             return cnt
 
-    warning("did not find any object at the center of the image")
+    logging.warning("did not find any object at the center of the image")
 
     # if no contour contained the center, return largest one
     best_cont = None
@@ -134,88 +134,94 @@ def dea_fit_ellipse(img, closing_radius=5):
     if img is None:
         return None
 
-    img_orig = np.copy(img)  # keep copy of original image
+    try:
+        # binarize
+        img_bw_orig = get_binary_image(img, closing_radius)
 
-    # binarize
-    img_bw_orig = get_binary_image(img, closing_radius)
+        # make copy to keep original
+        img_bw = np.copy(img_bw_orig)
 
-    # make copy to keep original
-    img_bw = np.copy(img_bw_orig)
+        mask, ellipse = approximate_electrode_area(img_bw)
+        img_bw = cv.bitwise_and(img_bw_orig, mask)
+        cont = find_contour(img_bw, ellipse[0])
+        ell_cont, hierarchy = cv.findContours(mask, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_NONE)
+        ell_cont = ell_cont[0]  # there can be only one contour
 
-    mask, ellipse = approximate_electrode_area(img_bw)
-    img_bw = cv.bitwise_and(img_bw_orig, mask)
-    cont = find_contour(img_bw, ellipse[0])
-    ell_cont, hierarchy = cv.findContours(mask, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_NONE)
-    ell_cont = ell_cont[0]  # there can be only one contour
+        # check contour against ellipse contour
+        cont = np.squeeze(cont)
+        ell_cont = np.squeeze(ell_cont)
+        is_on_ellipse = np.zeros((cont.shape[0]), dtype=bool)
+        for i1 in range(0, cont.shape[0]):
+            if (ell_cont == cont[i1, :]).all(axis=1).any():
+                is_on_ellipse[i1] = True
+        is_included = np.logical_not(is_on_ellipse)
 
-    # check contour against ellipse contour
-    cont = np.squeeze(cont)
-    ell_cont = np.squeeze(ell_cont)
-    is_on_ellipse = np.zeros((cont.shape[0]), dtype=bool)
-    for i1 in range(0, cont.shape[0]):
-        if (ell_cont == cont[i1, :]).all(axis=1).any():
-            is_on_ellipse[i1] = True
-    is_included = np.logical_not(is_on_ellipse)
+        # post-process excluded region (convert to BW image and use morphological operations)
+        is_included = np.array(is_included * 255, dtype=np.uint8)  # to bw image
+        is_included = np.reshape(is_included, (-1, 1))
+        # close small gaps in the contour (random peaks that got excluded)
+        strel = cv.getStructuringElement(cv.MORPH_RECT, (1, 51))
+        is_included = cv.morphologyEx(is_included, cv.MORPH_CLOSE, strel)
+        strel = cv.getStructuringElement(cv.MORPH_RECT, (1, 51))
+        is_included = cv.morphologyEx(is_included, cv.MORPH_OPEN, strel)
+        # extend excluded regions
+        strel = cv.getStructuringElement(cv.MORPH_RECT, (1, 201))
+        is_included = cv.morphologyEx(is_included, cv.MORPH_ERODE, strel)
+        is_included = is_included > 0
 
-    # post-process excluded region (convert to BW image and use morphological operations)
-    is_included = np.array(is_included * 255, dtype=np.uint8)  # to bw image
-    is_included = np.reshape(is_included, (-1, 1))
-    # close small gaps in the contour (random peaks that got excluded)
-    strel = cv.getStructuringElement(cv.MORPH_RECT, (1, 51))
-    is_included = cv.morphologyEx(is_included, cv.MORPH_CLOSE, strel)
-    strel = cv.getStructuringElement(cv.MORPH_RECT, (1, 51))
-    is_included = cv.morphologyEx(is_included, cv.MORPH_OPEN, strel)
-    # extend excluded regions
-    strel = cv.getStructuringElement(cv.MORPH_RECT, (1, 201))
-    is_included = cv.morphologyEx(is_included, cv.MORPH_ERODE, strel)
-    is_included = is_included > 0
+        is_included = np.reshape(is_included, (-1))
 
-    is_included = np.reshape(is_included, (-1))
+        # find islands
+        incl_diff = np.diff(np.array(is_included, dtype=np.int8))
+        i_start = np.nonzero(incl_diff > 0)[0]
+        i_end = np.nonzero(incl_diff < 0)[0]
 
-    # find islands
-    incl_diff = np.diff(np.array(is_included, dtype=np.int8))
-    i_start = np.nonzero(incl_diff > 0)[0]
-    i_end = np.nonzero(incl_diff < 0)[0]
+        # fix length mismatch (in case a transition is at the beginning/end of the data and no caught by diff)
+        if len(i_start) < len(i_end):  # fewer starts than ends
+            i_start = np.insert(i_start, 0, 0)  # first block starts at index 0
+        elif len(i_start) > len(i_end):  # fewer ends than starts
+            i_end = np.append(i_end, len(is_included) - 1)  # last block ends at last index
 
-    # fix length mismatch (in case a transition is at the beginning/end of the data and no caught by diff)
-    if len(i_start) < len(i_end):  # fewer starts than ends
-        i_start = np.insert(i_start, 0, 0)  # first block starts at index 0
-    elif len(i_start) > len(i_end):  # fewer ends than starts
-        i_end = np.append(i_end, len(is_included) - 1)  # last block ends at last index
+        # if lengths still don't match, we have a problem!
+        if len(i_start) != len(i_end):
+            raise ValueError("can't match start and end of included regions")
+        if len(i_start) != 3:
+            logging.warning("Expected 3 contour regions to include. Found: {}".format(len(i_start)))
 
-    # if lengths still don't match, we have a problem!
-    if len(i_start) != len(i_end):
-        raise ValueError("can't match start and end of included regions")
-    if len(i_start) != 3:
-        warning("Expected 3 contour regions to include. Found: {}".format(len(i_start)))
+        # TODO: solve this proble properly! Not just catch the error
+        if i_start[0] > i_end[0]:  # start and end don't match -> shift order to match them
+            i_end = np.roll(i_end, -1)
+        # include_regions = np.concatenate(i_start, i_end, axis=1)  # combine matched start and end indices
 
-    if i_start[0] > i_end[0]:  # start and end don't match -> shift order to match them
-        i_end = np.roll(i_end, -1)
-    # include_regions = np.concatenate(i_start, i_end, axis=1)  # combine matched start and end indices
+        contour_split = []
+        for i in range(len(i_start)):
+            section = None
+            if i_start[i] < i_end[i]:  # the normal case, where start and end are in order
+                section = cont[i_start[i] + 1:i_end[i] + 1, :]
+            else:
+                s1 = cont[i_start[i] + 1:, :]
+                s2 = cont[:i_end[i] + 1, :]
+                section = np.append(s1, s2, axis=1)
 
-    contour_split = []
-    for i in range(len(i_start)):
-        section = None
-        if i_start[i] < i_end[i]:  # the normal case, where start and end are in order
-            section = cont[i_start[i] + 1:i_end[i] + 1, :]
-        else:
-            s1 = cont[i_start[i] + 1:, :]
-            s2 = cont[:i_end[i] + 1, :]
-            section = np.append(s1, s2, axis=1)
+            contour_split.append(np.reshape(section, (-1, 1, 2)))
 
-        contour_split.append(np.reshape(section, (-1, 1, 2)))
+        # stitch together to get ellipse fit
+        cont_stitched = np.concatenate(contour_split)
 
-    # stitch together to get ellipse fit
-    cont_stitched = np.concatenate(contour_split)
+        ellipse = cv.fitEllipseDirect(cont_stitched)
 
-    ellipse = cv.fitEllipseDirect(cont_stitched)
+        return ellipse
 
-    return ellipse
+    except Exception as ex:
+        logging.warning("unable to fit ellipse {}".format(ex))
+        return None
 
 
 def draw_ellipse(img, ellipse):
     if img is None:
         return None
+    if ellipse is None:
+        return img
     img = np.copy(img)  # copy so we don't alter the original
     cv.ellipse(img, ellipse, (255, 0, 0), 2)
     return img

@@ -305,9 +305,9 @@ class NERD:
 
                 # get images
                 cap = ImageCapture.SharedInstance
-                imgs = cap.get_images()
+                imgs = cap.read_images()
                 # use timestamp of the last image for the whole set so they have a realistic and matching timestamp
-                timestamp = cap.get_timestamp(cap.get_camera_count() - 1)
+                # timestamp = cap.get_timestamps(cap.get_camera_count() - 1)
 
                 # get image name suffix
                 suffix = "{}V".format(measuredVoltage)  # store voltage in file name

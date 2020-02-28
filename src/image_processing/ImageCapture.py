@@ -1,9 +1,115 @@
-import copy
 import logging
+import time
 from datetime import datetime
 from threading import Thread, Event
 
 import cv2 as cv
+
+from libs.duallog import duallog
+
+
+class Camera:
+
+    def __init__(self, index, desired_resolution=None, new_image_callback=None):
+        self.logging = logging.getLogger("Camera")
+
+        # open image capture
+        self.cap = cv.VideoCapture(index + cv.CAP_MSMF)  # use Windows Media Foundation backend. No others work!
+        # set properties
+        if desired_resolution is not None:
+            self.set_resolution(desired_resolution)
+
+        # init buffers
+        self.name = "Camera {}".format(index)
+        self.image_buffer = None
+        self.grab_timestamp = None  # timestamp for the last grab
+        self.image_timestamp = None  # timestamp for image in buffer. May differ from grab_timestamp if retrieve failed
+        self.grab_ok = False
+
+        # callback
+        self.new_image_callback = new_image_callback
+
+    def set_resolution(self, desired_resolution):
+        self.cap.set(cv.CAP_PROP_FRAME_WIDTH, desired_resolution[0])
+        self.cap.set(cv.CAP_PROP_FRAME_HEIGHT, desired_resolution[1])
+
+    def grab(self):
+        """
+        Grab a frame from this camera. The frame is not retrieved at this point.
+        :return: a flag indicating success or failure
+        """
+        cam = self.cap
+        if not cam.isOpened():  # just to be sure. this should never be the case, theoretically
+            self.logging.debug("{} is not open".format(self.name))
+            return
+
+        suc = cam.grab()  # call grab to quickly obtain a frame, which can be decoded with "retrieve()" later
+        if suc:
+            self.grab_timestamp = datetime.now()  # record timestamp of the grabbed image
+        else:
+            self.logging.warning("Unable to grab frame from {}".format(self.name))
+
+        self.grab_ok = suc
+        return suc
+
+    def retrieve(self):
+        """
+        Retrieve a frame from the specified camera and store it in the buffer
+        :return: a flag indicating success or failure, and the retrieved frame (or None, if unsuccessful)
+        """
+        cam = self.cap
+
+        if not cam.isOpened():  # just to be sure. this should never be the case, theoretically
+            self.logging.debug("{} is not open".format(self.name))
+            return False, None
+
+        if self.grab_ok:  # check if previous grab was successful
+            suc, frame = cam.retrieve()  # retrieve frame previously captured by "grab()"
+
+            if suc:
+                self.image_buffer = frame.copy()  # store copy in buffer so we cn return this instance
+                self.image_timestamp = self.grab_timestamp  # update the timestamp
+
+                self.logging.debug("Retrieved frame from {}. Size: {}".format(self.name, frame.shape))
+
+                # if callback is defined, call callback function
+                if self.new_image_callback is not None:
+                    self.logging.debug("Calling new image callback for {}".format(self.name))
+                    self.new_image_callback(frame, self.image_timestamp, self.name)
+
+                return True, frame
+            else:
+                self.logging.warning("Unable to retrieve frame from {}".format(self.name))
+
+        else:  # previous grab was not successful
+            self.logging.warning("Last grab from {} was unsuccessful. No image was retrieved".format(self.name))
+
+        self.image_buffer = None  # clear buffer to indicate no current image is available
+        return False, None
+
+    def read(self):
+        """
+        Grab and retrieve an image from this camera
+        :return: a flag indicating success or failure, and the retrieved image (or None, in case of failure)
+        """
+        if self.grab():
+            return self.retrieve()
+        else:
+            return False, None
+
+    def get_image_from_buffer(self):
+        """
+        Return the last image of this camera from the buffer. No new image is captured.
+        :return: The last image captured by this camera
+        """
+        return self.image_buffer.copy()
+
+    def isOpened(self):
+        # TODO: maybe take into account grab_ok?
+        return self.cap.isOpened()
+
+    def release(self):
+        self.cap.release()
 
 
 class ImageCapture:
@@ -12,28 +118,36 @@ class ImageCapture:
 
     def __init__(self):
         self.logging = logging.getLogger("ImageCapture")
-        self._camera_count = -1  # not yet initialized
+
+        # image capture settings
+        self.desired_resolution = [1920, 1080]
+        self.auto_reconnect = True
+
+        # internal variables
         self._cameras = []
+        self._camera_count = -1  # not yet initialized
         self._camera_names = []
-        self._image_buffer = []
-        self._grab_timestamp = []  # timestamp for the last grab
-        self._image_timestamp = []  # timestamps for images in buffer. May differ from grab_timestamp if retrieve failed
-        self._desired_resolution = [1920, 1080]
-        self._new_image_callback = None
-        self._new_set_callback = None
+        self._camera_states = []  # to indicate if a camera was lost (no longer able to grab images)
+        self._cameras_available = []
+        self._camera_selection = None
+
+        # threading
         self._exit_flag = None
         self._capture_thread = None
-        self._grab_ok = []
+
+        # callbacks
+        self._new_image_callback = None
+        self.new_set_callback = None
 
     def _reset(self):
+        # todo: end capture thread if it's running
         self.close_cameras()
-        self._camera_count = -1  # not yet initialized
         self._cameras = []
+        self._camera_count = -1
         self._camera_names = []
-        self._image_buffer = []
-        self._grab_timestamp = []  # timestamp for the last grab
-        self._image_timestamp = []  # timestamps for images in buffer. May differ from grab_timestamp if retrieve failed
-        self._grab_ok = []
+        self._camera_states = []
+        self._cameras_available = []
+        self._camera_selection = None
 
     def set_new_image_callback(self, new_image_callback):
         """
@@ -41,13 +155,15 @@ class ImageCapture:
         :param new_image_callback: Callback function of prototype: func(image, timestamp, camera_id)
         """
         self._new_image_callback = new_image_callback
+        for cam in self._cameras:
+            cam.new_image_callback = new_image_callback
 
     def set_new_set_callback(self, new_set_callback):
         """
         Set a function to call every time a new set of images becomes available (i.e. one new image from each camera)
         :param new_set_callback: Callback function of prototype: func(images[], timestamps[])
         """
-        self._new_set_callback = new_set_callback
+        self.new_set_callback = new_set_callback
 
     def get_camera_count(self):
         """
@@ -60,35 +176,64 @@ class ImageCapture:
 
         return self._camera_count
 
+    def _get_names_from_cameras(self):
+        """
+        Assemble a list of the names of the available/selected cameras
+        :return: A list of names of the available cameras
+        """
+        # TODO: deal with startup where names have not yet been assigned
+        # if self._camera_count == -1:  # not initialized yet  --> go find cameras
+        #     self.logging.info("ImageCapture not yet initialized. Initializing cameras...")
+        #     self.find_cameras()
+
+        return [cam.name for cam in self._cameras]
+
     def get_camera_names(self):
         """
         Get the names of the available/selected cameras
         :return: The names of the available cameras
         """
-        if self._camera_count == -1:  # not initialized yet  --> go find cameras
-            self.logging.info("ImageCapture not yet initialized. Initializing cameras...")
-            self.find_cameras()
+        # TODO: deal with startup where names have not yet been assigned
+        return self._get_names_from_cameras()
 
-        return copy.copy(self._camera_names)  # copy to prevent write access. probably unnecessary...
+    def set_camera_names(self, names):
+        """
+        Set the names for all cameras.
+        :param names: The new name to assign to the camera
+        """
+        if len(names) != self._camera_count:
+            self.logging.warning("Need to supply a name for each camera! No names were changed!")
+            return
+        else:
+            for i in range(self._camera_count):
+                cam = self._cameras[i]
+                self.logging.info("Changing name '{}' to '{}'".format(cam.name, names[i]))
+                cam.name = names[i]
+            self._camera_names = names
 
-    def get_camera_name(self, cam_id):
+    def get_camera(self, cam_id):
         """
-        Get the names of the available/selected cameras
-        :return: The names of the available cameras
+        Get camera by name or index
+        :param cam_id: The name or index of the camera
+        :return: The camera with the given name or index, or None if no camera with that name exists
         """
-        assert cam_id < self._camera_count
-        return self._camera_names[cam_id]
-
-    def set_camera_name(self, cam_id, name):
-        """
-        Set the name of the specified camera.
-        :param cam_id: The index of the camera (if a selection has been made, this may be different from the index used
-        by the OpenCV backend)
-        :param name: The new name to assign to the camera
-        """
-        if cam_id < self._camera_count:
-            self.logging.info("Changing name '{}' to '{}'".format(self._camera_names[cam_id], name))
-            self._camera_names[cam_id] = name
+        if type(cam_id) is str:
+            names = self.get_camera_names()
+            try:
+                cid = names.index(cam_id)
+                return self._cameras[cid]
+            except ValueError:
+                self.logging.warning("No camera with name {} was found".format(cam_id))
+                return None
+        elif type(cam_id) is int:
+            if 0 <= cam_id < self._camera_count:
+                return self._cameras[cam_id]
+            else:
+                self.logging.warning("No camera with index {} available".format(cam_id))
+                return None
+        else:
+            self.logging.warning("Not a valid camera id: {}. Expected string or int!".format(cam_id))
+            return None
 
     def find_cameras(self):
         """
@@ -99,52 +244,78 @@ class ImageCapture:
 
         self._reset()  # release all cams and empty buffers
 
-        i = 0
+        i = -1
         while True:
             # open all cameras starting at index 0
-            # is camera was already open, it will be closed and re-opened internally
-            cap = cv.VideoCapture(i + cv.CAP_MSMF)  # be sure to use Windows Media Foundation backend. No others work!
-            cap.set(cv.CAP_PROP_FRAME_WIDTH, self._desired_resolution[0])
-            cap.set(cv.CAP_PROP_FRAME_HEIGHT, self._desired_resolution[1])
+            i += 1  # increase index to try next camera
+            # if camera was already open, it will be closed and re-opened internally
+            cam = Camera(i, self.desired_resolution, self._new_image_callback)
 
-            if not cap.isOpened():
+            if not cam.isOpened():
                 break  # if unable to open, a camera with this index doesn't exist. Stop search.
             else:
-                i += 1  # increase index each time we found a camera. Do this first so numbering starts at 1
-                self.logging.info("Camera {} opened".format(i))
-                success, frame = cap.read()  # check if we can read an image
+                self.logging.info("{} opened".format(cam.name))
+                success, frame = cam.read()  # check if we can read an image
                 if success:
                     # store camera handle, name, and captured image
-                    self._cameras.append(cap)
-                    self._camera_names.append("Camera {}".format(i))
-                    self._image_buffer.append(frame)
-                    t = datetime.now()
-                    self._grab_timestamp.append(t)
-                    self._image_timestamp.append(t)
-                    self._grab_ok.append(True)
-                    self._camera_count = i
+                    self._cameras.append(cam)
 
-                    # if callback is defined, call callback function
-                    if self._new_image_callback is not None:
-                        self.logging.debug("Calling new image callback")
-                        self._new_image_callback(frame.copy(), t, i - 1)  # -1 to use 0-based indexing
                 else:
-                    self.logging.warning("Unable to retrieve image from camera {}. Camera will be closed.".format(i))
-                    cap.release()
+                    self.logging.warning("Unable to retrieve image from {}. Camera will be closed.".format(cam.name))
+                    cam.release()
 
-        self.logging.info("{} cameras found".format(i))
+        self._cameras_available = self._cameras  # store list of all available cameras.
+
+        self._camera_count = len(self._cameras)
+        self._camera_names = self._get_names_from_cameras()
+
+        self.logging.info("{} cameras found".format(self._camera_count))
+
         # call new set callback since the first full set of images is now available
-        if self._new_set_callback is not None:
-            self._new_set_callback(self.get_images_from_buffer(), self.get_timestamps())
+        if self.new_set_callback is not None:
+            self.new_set_callback(self.get_images_from_buffer(), self.get_timestamps())
+
+    def reconnect_cameras(self):
+        self.logging.info("attempting to reconnect cameras")
+        # TODO: handle camera selection
+
+        prev_count = self._camera_count
+        prev_available = len(self._cameras_available)
+        prev_selection = self._camera_selection
+        prev_names = self._camera_names
+        state = self._camera_states
+
+        self.close_cameras()
+        time.sleep(5)
+
+        self.find_cameras()
+        new_count = self._camera_count
+
+        cams_lost = prev_available - new_count
+        cams_failed = state.count(False)
+
+        if cams_lost is 0:
+            if prev_selection is not None:
+                self.select_cameras(prev_selection)
+                self.set_camera_names(prev_names)
+            self.logging.info("Cameras successfully reconnected")
+        elif cams_lost is cams_failed:  # we can match the failure to the lost camera
+            i_failed = [i for i, x in enumerate(state) if x is False]
+            for i in i_failed:
+                self._cameras.insert(i, Camera(100))  # insert dummy camera. safe to assume camera 100 doesn't exist
+        else:
+            self.logging.info("Don't know what to do here. Going to try and carry on as if nothing happened...")
+            if prev_selection is not None:
+                self.select_cameras(prev_selection)
+                self.set_camera_names(prev_names)
+            # TODO: deal with unknown cameras
 
     def select_cameras(self, camera_ids):
+
         if self._camera_count == -1:  # not initialized --> find cameras
             self.find_cameras()
 
         cams = []
-        names = []
-        images = []
-
         # select cameras in the specified order.
         for cid in camera_ids:
             # Raise error if a requested camera is not available
@@ -152,101 +323,36 @@ class ImageCapture:
                 self.logging.critical("Invalid camera selected: camera {} is not available!".format(cid))
                 raise ValueError("Invalid camera selection!")
             elif cid >= 0:  # if -1, the camera is not used so we don't need to do anything
-                cams.append(self._cameras[cid])
-                names.append(self._camera_names[cid])
-                images.append(self._image_buffer[cid])
+                cams.append(self._cameras_available[cid])
 
         # release all cameras that are not being used
         for i in range(self._camera_count):
             if i not in camera_ids:
-                self._cameras[i].release()
+                self._cameras_available[i].release()
 
         self._cameras = cams
-        self._camera_names = names
         self._camera_count = len(cams)
-        # reset buffer and timestamps
-        self._image_buffer = [None] * self._camera_count
-        self._grab_timestamp = [None] * self._camera_count
-        self._image_timestamp = [None] * self._camera_count
-
-        # grab a new image from each cam to update the buffer
-        self.grab_images()
-        self.retrieve_images()
-
-    def grab_single_image(self, cam_id):
-        """
-        Grab a frame from the specified camera. The frame is not retrieved at this point.
-        :param cam_id: The camera index
-        """
-        assert cam_id < self._camera_count
-
-        cam = self._cameras[cam_id]
-
-        if not cam.isOpened():  # just to be sure. this should never be the case, theoretically
-            self.logging.debug("Camera {} is not open".format(self._cameras.index(cam)))
-            return
-
-        suc = cam.grab()  # call grab to quickly obtain a frame, which can be decoded with "retrieve()" later
-        if suc:
-            self._grab_timestamp[cam_id] = datetime.now()  # record timestamp of the grabbed image
-        else:
-            self.logging.warning("Unable to grab frame from camera {}".format(self._cameras.index(cam)))
-
-        self._grab_ok[cam_id] = suc
-        return suc
+        self._camera_names = self._get_names_from_cameras()
+        self._camera_selection = camera_ids  # store so we can reconstruct the selection when reconnecting
 
     def grab_images(self):
         """
         Grab a frame from each selected camera. Only grab is performed and no image is retrieved at this point.
         This allows capturing of images from all cameras as close as possible in time.
         Captured images can be loaded with "retrieve_images" later.
+        :return: a list of flags to indicate if each grab succeeded
         """
-
-        for i in range(self._camera_count):
-            self.grab_single_image(i)
-
-    def retrieve_single_image(self, cam_id):
-        """
-        Retrieve a frame from the specified camera and store it in the buffer
-        :param cam_id: The camera index
-        """
-        assert cam_id < self._camera_count
-
-        cam = self._cameras[cam_id]
-
-        if not cam.isOpened():  # just to be sure. this should never be the case, theoretically
-            self.logging.debug("Camera {} is not open".format(self._cameras.index(cam)))
-            return
-
-        suc = self._grab_ok[cam_id]
-        frame = None
-        if suc:  # only retrieve if last grab was successful
-            suc, frame = cam.retrieve()  # retrieve frame previously captured by "grab()"
-
-        self._image_buffer[cam_id] = frame
-
-        if suc:
-            self._image_timestamp[cam_id] = self._grab_timestamp[cam_id]  # update the timestamp
-
-            self.logging.debug("Retrieved frame from camera {}. Size: {}".format(cam_id, frame.shape))
-
-            # if callback is defined, call callback function
-            if self._new_image_callback is not None:
-                self.logging.debug("Calling new image callback")
-                self._new_image_callback(frame.copy(), self._image_timestamp[cam_id], cam_id)
-        else:
-            self.logging.warning("Unable to retrieve frame from camera {}".format(cam_id))
+        self._camera_states = [cam.grab() for cam in self._cameras]
+        return self._camera_states
 
     def retrieve_images(self):
         """
         Retrieve a frame from each selected camera and store in buffer.
+        :return: a list of flags indicating success, and a list of the retrieved frames
         """
-        for i in range(self._camera_count):
-            self.retrieve_single_image(i)
-
-    def read_single_image(self, cam_id):
-        self.grab_single_image(cam_id)
-        self.retrieve_single_image(cam_id)
+        res = [cam.retrieve() for cam in self._cameras]
+        # turn list of tuples [(suc, frame), ...] into two lists [suc, ...], [frame, ...]
+        return [list(o) for o in zip(*res)]
 
     def read_images(self):
         """
@@ -259,40 +365,24 @@ class ImageCapture:
             self.find_cameras()
 
         self.grab_images()
-        self.retrieve_images()
 
-        if self._new_set_callback is not None:
-            self._new_set_callback(self.get_images_from_buffer(), self.get_timestamps())
+        if False in self._camera_states:
+            if self.auto_reconnect:
+                self.reconnect_cameras()
+                self.auto_reconnect = False  # turn off so we don't keep reconnecting forever
+            else:
+                self.logging.critical("Failed to reconnect. Shutting down")
+                raise Exception("Could not reconnect cameras")
+        else:
+            # all well, reconnect (if there was one) has succeeded, so if it happens again, we can try again
+            self.auto_reconnect = True
 
-    def get_images(self):
-        """
-        Read an image from each selected camera. First, a frame from each camera is grabbed and later retrieved so as to
-        ensure that frames are as close to each other in time as possible. The images are stored in the internal buffer
-        and a copy of the buffer is returned.
-        :return: A copy of the image buffer, after it was updated with the latest frame from each selected camera
-        """
-        self.read_images()
-        # return a copy of the image buffer (which was just updated)
-        return self.get_images_from_buffer()
+        sucs, frames = self.retrieve_images()
 
-    def get_single_image(self, cam_id):
-        """
-        Read an image from the specified camera. The image is stored in the internal buffer
-        and a copy of the image is returned.
-        :return: A newly captured image from the specified camera
-        """
-        self.read_single_image(cam_id)
-        # return a copy of the requested image from the buffer (which was just updated)
-        return self.get_single_image_from_buffer(cam_id)
+        if self.new_set_callback is not None:
+            self.new_set_callback(frames, self.get_timestamps())
 
-    def get_single_image_from_buffer(self, cam_id):
-        """
-        Return the last image of the specified camera from the buffer. No new image is captured.
-        :param cam_id: The camera index
-        :return: The last image captured by the specified camera
-        """
-        assert cam_id < self._camera_count
-        return self._image_buffer[cam_id].copy()
+        return frames
 
     def get_images_from_buffer(self):
         """
@@ -300,31 +390,14 @@ class ImageCapture:
         :return: A copy of the image buffer
         """
         # create a copy of the image buffer to ensure we always keep an unadulterated copy
-        return copy.deepcopy(self._image_buffer)
-
-    def get_timestamp(self, cam_id):
-        """
-        Returns the timestamp of the frame from the specified camera that is currently stored in the buffer
-        :param cam_id: The camera index
-        :return: The timestamp of the current frame from that camera
-        """
-        assert cam_id < self._camera_count
-        return self._image_timestamp[cam_id]
+        return [cam.get_image_from_buffer() for cam in self._cameras]
 
     def get_timestamps(self):
         """
         Return a list containing a timestamps for the most recent image of each selected camera
         :return: A timestamp for each image in the buffer
         """
-        return copy.deepcopy(self._image_timestamp)  # copy to prevent any outside access. probably unnecessary
-
-    def close_camera(self, cam_id):
-        """
-        Close the specified camera
-        :param cam_id: The index of the camera to close
-        """
-        assert cam_id < self._camera_count
-        self._cameras[cam_id].release()
+        return [cam.image_timestamp for cam in self._cameras]  # get timestamp of last image from each camera
 
     def close_cameras(self):
         """
@@ -345,7 +418,7 @@ class ImageCapture:
             return
 
         logging.info("Starting image capture thread")
-        if self._new_image_callback is None and self._new_set_callback is None:
+        if self._new_image_callback is None and self.new_set_callback is None:
             logging.warning("No callback is set!")
 
         self._exit_flag = Event()
@@ -367,6 +440,25 @@ class ImageCapture:
         if self._capture_thread is None:
             return False
         return self._capture_thread.is_alive()
+
+    def run_test(self):
+        res = 0
+        # todo: implement proper resource management so files can be accessed consistently from anywhere
+        no_img = cv.imread("../../res/images/no_image.png")
+        waiting_img = cv.imread("../../res/images/waiting.jpeg")
+        cv.imshow('Camera 0', cv.resize(waiting_img, (0, 0), fx=0.5, fy=0.5))
+
+        while res & 0xFF != ord('q'):
+
+            imgs = self.read_images()
+
+            for i in range(len(imgs)):
+                if imgs[i] is None:
+                    cv.imshow('Camera {}'.format(i), cv.resize(no_img, (0, 0), fx=0.5, fy=0.5))
+                else:
+                    cv.imshow('Camera {}'.format(i), cv.resize(imgs[i], (0, 0), fx=0.25, fy=0.25))
+
+            res = cv.waitKey(500)
 
 
 class ImageCaptureThread(Thread):
@@ -397,3 +489,8 @@ class ImageCaptureThread(Thread):
 
 
 SharedInstance = ImageCapture()
+
+if __name__ == '__main__':
+    duallog.setup("camera test logs", minlevelConsole=logging.DEBUG, minLevelFile=logging.DEBUG)
+    logging.info("Testing image capture")
+    SharedInstance.run_test()
