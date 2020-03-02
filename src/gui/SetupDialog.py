@@ -192,7 +192,7 @@ class SetupDialog(QtWidgets.QDialog):
 
         ret = -1
         while ret == -1:
-            cv2.imshow("DEA {} - Press any key to close".format(i_dea), self._image_capture.get_single_image(i_cam))
+            cv2.imshow("DEA {} - Press any key to close".format(i_dea), self._image_capture.get_camera(i_cam).read())
             try:
                 ret = cv2.waitKey(100)
                 self.logging.debug("Key pressed {}".format(ret))
@@ -242,11 +242,12 @@ class SetupDialog(QtWidgets.QDialog):
             self.logging.error("Exception in combobox callback: {}".format(ex))
 
     def refreshImages(self):
+        images = self._image_capture.get_images_from_buffer()
         for i_dea in range(self._n_deas):
             i_cam = self._camorder[i_dea]
             if i_cam >= 0:
                 if self.btnPreview.isChecked():
-                    img = self._image_capture.get_single_image_from_buffer(i_cam)
+                    img = images[i_cam]
                     try:
                         ellipse = StrainDetection.dea_fit_ellipse(img, 5)
                         img = StrainDetection.draw_ellipse(img, ellipse)
@@ -256,7 +257,7 @@ class SetupDialog(QtWidgets.QDialog):
                         pass
                     self.setImage(i_dea, img)
                 else:
-                    self.setImage(i_dea, self._image_capture.get_images_from_buffer()[i_cam])
+                    self.setImage(i_dea, images[i_cam])
             else:
                 self.setImage(i_dea, ImageCapture.ImageCapture.IMG_NOT_AVAILABLE)
 
