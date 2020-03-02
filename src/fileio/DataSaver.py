@@ -64,13 +64,14 @@ class DataSaver:
             data["imagefile"] = timestamp.strftime("%Y%m%d-%H%M%S")  # same as in image file name, to help find it
             # TODO: create option to choose channels (e.g. use only channels 1, 2, 5, 6)
         for i in range(self.nbDea):
-            data["DEA{}_state".format(i)] = dea_state[i]
-            if resistance is not None:
+            if dea_state is not None and i < len(dea_state):
+                data["DEA{}_state".format(i)] = dea_state[i]
+            if resistance is not None and i < len(resistance):
                 data["DEA{}_resistance".format(i)] = resistance[i]
-            if strain is not None:
+            if strain is not None and i < strain.shape[0]:
                 data["DEA{}_strain_X".format(i)] = strain[i, 0]
                 data["DEA{}_strain_Y".format(i)] = strain[i, 1]
-            if center_shift is not None:
+            if center_shift is not None and i < center_shift.shape[0]:
                 data["DEA{}_center_X".format(i)] = center_shift[i, 0]
                 data["DEA{}_center_Y".format(i)] = center_shift[i, 1]
 

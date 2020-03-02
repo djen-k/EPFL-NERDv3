@@ -218,10 +218,11 @@ def dea_fit_ellipse(img, closing_radius=5):
 
 
 def draw_ellipse(img, ellipse):
-    if img is None:
-        return None
-    if ellipse is None:
+    if img is None or ellipse is None:
         return img
-    img = np.copy(img)  # copy so we don't alter the original
-    cv.ellipse(img, ellipse, (255, 0, 0), 2)
+    try:
+        img = np.copy(img)  # copy so we don't alter the original
+        cv.ellipse(img, ellipse, (255, 0, 0), 2)
+    except Exeption as ex:
+        logging.debug("Unable to draw ellipse: {}".format(ex))
     return img
