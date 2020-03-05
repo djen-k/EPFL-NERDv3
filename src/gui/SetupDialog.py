@@ -192,8 +192,8 @@ class SetupDialog(QtWidgets.QDialog):
 
         ret = -1
         while ret == -1:
-            cv2.imshow("DEA {} - Press any key to close".format(i_dea), self._image_capture.get_camera(i_cam).read())
             try:
+                cv2.imshow("DEA {} - Press any key to close".format(i_dea), self._image_capture.read_single(i_cam))
                 ret = cv2.waitKey(100)
                 self.logging.debug("Key pressed {}".format(ret))
             except Exception as ex:
@@ -250,7 +250,7 @@ class SetupDialog(QtWidgets.QDialog):
                     img = images[i_cam]
                     try:
                         ellipse = StrainDetection.dea_fit_ellipse(img, 5)
-                        img = StrainDetection.draw_ellipse(img, ellipse)
+                        img = StrainDetection.visualize_result(img, ellipse)
                         self.logging.debug("Electrode area for DEA {}: {}".format(i_dea, ellipse))
                     except Exception as ex:
                         self.logging.warning("Failed to detect electrode area for DEA {}! ({})".format(i_dea, ex))

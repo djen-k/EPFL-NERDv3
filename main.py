@@ -14,7 +14,7 @@ from src.fileio.ImageSaver import ImageSaver
 from src.fileio.config import read_config, write_config
 from src.gui import SetupDialog
 from src.hvps import NERDHVPS
-from src.image_processing import ImageCapture, StrainDetection
+from src.image_processing import ImageCapture
 
 
 class App(QMainWindow):
@@ -90,55 +90,6 @@ def _setup(_comport, _camorder, _voltage):
         raise Exception("No COM port or cam order selected")
 
     return _comport, _camorder, _voltage
-
-
-def decompose_ellipses(ellipses):
-    centers = []
-    radii = []
-    angles = []
-    for el in ellipses:
-        if el is None:
-            centers.append((np.nan, np.nan))
-            radii.append((np.nan, np.nan))
-            angles.append(np.nan)
-        else:
-            centers.append(el[0])
-            radii.append(el[1])
-            angles.append(el[2])
-
-    return np.array(centers), np.array(radii), np.array(angles)
-
-
-def ellipse_radius_at_angle(radii, ellipse_angle, query_angle):
-    """
-    Calculate the radius of a given ellipse at the specified angle.
-    :param radii: n-by-2 array of radii (a, b) for each of n ellipses
-    :param ellipse_angle: n-by-1 array of angles for each of n ellipses (in deg, from x-axis to first ellipse axis)
-    :param query_angle: 1-by-m array of angles (in deg) for which to calculate the radii
-    :return: n-by-m array of radii for the given ellipses at the specified angles
-    """
-
-    # ensure that all arrays have the right dimensions
-    radii = np.reshape(radii, (-1, 2))
-    ellipse_angle = np.reshape(ellipse_angle, (-1, 1))
-    query_angle = np.reshape(query_angle, (1, -1))
-
-    # calculate radii
-    a = np.deg2rad(query_angle - ellipse_angle)
-    prod = np.prod(radii, 1, keepdims=True)
-    sqr_sum = np.sqrt((radii[:, None, 0] * np.sin(a)) ** 2 + (radii[:, None, 1] * np.cos(a)) ** 2)  # None to keep dims
-
-    return prod / sqr_sum
-
-
-def get_ellipse_fits(imgs, output_result_image=True):
-    ellipses = [StrainDetection.dea_fit_ellipse(img) for img in imgs]  # get fit for each DEA
-
-    res_imgs = None
-    if output_result_image:
-        res_imgs = [StrainDetection.draw_ellipse(imgs[i], ellipses[i]) for i in range(len(imgs))]
-
-    return ellipses, res_imgs
 
 
 class NERD:
@@ -387,24 +338,6 @@ class NERD:
         self.logging.critical("Turned voltage off and disconnected relays")
         saver.close()
         self.image_cap.close_cameras()
-
-    def calculate_strain(self, ellipses):
-        # TODO: move to StrainDetection
-        # calculate strain and center shift
-        centers, el_radii, angles = decompose_ellipses(ellipses)  # get as numpy arrays
-
-        xy_radii = ellipse_radius_at_angle(el_radii, angles, np.array([0, 90]))
-
-        # if there is not yet any reference for strain measurements, set these ellipses as the reference
-        if self.reference_radii is None:
-            self.reference_radii = xy_radii
-            self.reference_center = centers
-            self.logging.info("Setting new strain reference")
-
-        strain = xy_radii / self.reference_radii
-        center_shift = centers - self.reference_center
-
-        return strain, center_shift
 
 
 if __name__ == '__main__':

@@ -4,6 +4,106 @@ import cv2 as cv
 import numpy as np
 
 
+class StrainDetector:
+
+    def __init__(self):
+
+        self.logging = logging.getLogger("StrainDetector")
+
+        self._reference_ellipses = None
+        self._reference_radii = None
+        self._reference_centers = None
+        self._flag_setting_reference = False
+        self._query_angles = np.array([0, 90])
+
+    def set_reference(self, reference_images):
+        self._reference_ellipses = None
+        self._reference_radii = None
+        self._reference_centers = None
+        self._flag_setting_reference = True
+        self.get_dea_strain(reference_images)
+
+    def get_dea_strain(self, imgs, output_result_image=True):
+
+        # TODO: deal with mismatch in n of images and n of references
+
+        ellipses = [dea_fit_ellipse(img) for img in imgs]  # get fit for each DEA
+        # calculate strain and center shift
+        ellipses_np = ellipses_to_numpy_array(ellipses)  # get as numpy array
+        xy_radii = ellipse_radius_at_angle(ellipses_np, self._query_angles)
+        centers = ellipses_np[:, 0:2]
+
+        # if there is not yet any reference for strain measurements, set these ellipses as the reference
+        if self._reference_ellipses is None:
+            if not self._flag_setting_reference:
+                self.logging.warning("No strain reference has been set yet. The given images will be set as reference.")
+            else:
+                self.logging.info("A new strain reference was set")
+            self._reference_ellipses = ellipses
+            self._reference_radii = xy_radii
+            self._reference_centers = centers
+
+        # calculate strain and shift
+        strain = xy_radii / self._reference_radii
+        strain_area = np.prod(xy_radii, axis=1) / np.prod(self._reference_radii, axis=1)
+        strain_all = np.concatenate((strain, np.reshape(strain_area, (-1, 1))), axis=1)
+        center_shift = centers - self._reference_centers
+
+        res_imgs = None
+        if output_result_image:
+            res_imgs = [visualize_result(imgs[i], ellipses[i], self._reference_ellipses[i], tuple(xy_radii[i, :]),
+                                         tuple(self._query_angles), strain_all[i, :]) for i in range(len(imgs))]
+
+        return strain, center_shift, res_imgs
+
+
+def draw_ellipse(img, ellipse, color, line_width, draw_axes=False, axis_line_width=1):
+    # draw the ellipse
+    cv.ellipse(img, ellipse, color, line_width)
+    if draw_axes:
+        center, diameters, angle = ellipse
+        # draw both axes of the ellipse
+        draw_diameter(img, center, diameters[0] / 2, angle, color, axis_line_width)
+        draw_diameter(img, center, diameters[1] / 2, angle + 90, color, axis_line_width)
+
+
+def draw_diameter(img, center, radius, angle, color, line_width, also_draw_perpendicular=False):
+    """
+    Draw the diameter of a circle.
+    :param img: The image to draw on
+    :param center: The center of the circle
+    :param radius: The radius of the circle
+    :param angle: the angle at which to draw the diameter line
+    :param color: The line color
+    :param line_width: The line thickness
+    :param also_draw_perpendicular: Flag to indicate if the perpendicular diameter should also be drawn (making a cross)
+    """
+    # calculate start and end
+    x, y = center
+    a = np.deg2rad(angle)
+    rx = np.cos(a) * radius
+    ry = np.sin(a) * radius
+    p1 = (x - rx, y - ry)
+    p2 = (x + rx, y + ry)
+    # convert to int tuple for drawing method
+    p1_int = tuple(np.round(p1).astype(np.int))
+    p2_int = tuple(np.round(p2).astype(np.int))
+    cv.line(img, p1_int, p2_int, color, line_width)  # first line
+
+    if also_draw_perpendicular:
+        rx, ry = (-ry, rx)  # rotate 90°
+        p1_int = tuple(np.round((x - rx, y - ry)).astype(np.int))
+        p2_int = tuple(np.round((x + rx, y + ry)).astype(np.int))
+        cv.line(img, p1_int, p2_int, color, line_width)  # second line
+
+    return p1, p2
+
+
+def draw_cross(img, center, radius, angle, color, line_width):
+    # the draw diameter function already does this. but calling draw_cross reads more clearly
+    draw_diameter(img, center, radius, angle, color, line_width, True)
+
+
 def get_binary_image(img, closing_radius):
     """
     Turns the given color image into a binary image using Otsu's method to determine the threshold value.
@@ -74,7 +174,8 @@ def get_ellipse_mask(ellipse, img_shape, offset=0):
     # create image
     mask = np.zeros((img_shape[0], img_shape[1]), dtype=np.uint8)
     # draw ellipse
-    cv.ellipse(mask, ellipse, (255, 255, 255), -1)
+    cv.ellipse(mask, ellipse, (255, 255, 255), -1)  # use this version of the function which takes the ellipse as
+    # returned by fitEllipse (as floats and diameter instead of radius
 
     # dilate/erode by given offset, if necessary
     if offset != 0:
@@ -125,8 +226,6 @@ def approximate_electrode_area(img_bw, iterations=10, center=None):
         if i >= iterations:
             break
 
-    print("stopped approximation after", i, "iterations")
-
     return mask, ellipse
 
 
@@ -138,7 +237,7 @@ def dea_fit_ellipse(img, closing_radius=5):
         # binarize
         img_bw_orig = get_binary_image(img, closing_radius)
 
-        # make copy to keep original
+        # make copy to keep original2
         img_bw = np.copy(img_bw_orig)
 
         mask, ellipse = approximate_electrode_area(img_bw)
@@ -188,14 +287,13 @@ def dea_fit_ellipse(img, closing_radius=5):
         if len(i_start) != 3:
             logging.warning("Expected 3 contour regions to include. Found: {}".format(len(i_start)))
 
-        # TODO: solve this proble properly! Not just catch the error
+        # TODO: solve this problem properly! Not just catch the error
         if i_start[0] > i_end[0]:  # start and end don't match -> shift order to match them
             i_end = np.roll(i_end, -1)
         # include_regions = np.concatenate(i_start, i_end, axis=1)  # combine matched start and end indices
 
         contour_split = []
         for i in range(len(i_start)):
-            section = None
             if i_start[i] < i_end[i]:  # the normal case, where start and end are in order
                 section = cont[i_start[i] + 1:i_end[i] + 1, :]
             else:
@@ -217,12 +315,141 @@ def dea_fit_ellipse(img, closing_radius=5):
         return None
 
 
-def draw_ellipse(img, ellipse):
+def ellipses_to_numpy_array(ellipses):
+    """
+    Convert a list or tuple of ellipses (with diameter)
+    [((cx, cy), (d1, d2), angle), ...]
+    to a numpy array (with radii):
+    [ cx, cy, r1, r2, angle;
+      ...                    ]
+    :param ellipses: List or tuple of OpenCV ellipses
+    :return: The parameters of all ellipses arranged in a numpy array
+    """
+    # TODO: optimize ellipse decomposition maybe...?
+    centers = []
+    diameters = []
+    angles = []
+    for el in ellipses:
+        if el is None:
+            centers.append((np.nan, np.nan))
+            diameters.append((np.nan, np.nan))
+            angles.append(np.nan)
+        else:
+            centers.append(el[0])
+            diameters.append(el[1])
+            angles.append(el[2])
+
+    # convert diameters to radii
+    return np.concatenate((np.array(centers), np.array(diameters) / 2, np.reshape(np.array(angles), (-1, 1))), axis=1)
+
+
+def ellipse_radius_at_angle(ellipses_np, query_angles):
+    """
+    Calculate the radius of a given ellipse at the specified angle.
+    :param ellipses_np: A n-by-5 numpy array describing a set of ellipses [cx, cy, rx, ry, a; ...]
+    :param query_angles: 1-by-m array of angles (in deg, in world coordinates - not relative to the ellipse)
+    for which to calculate the radii.
+    :return: n-by-m array of radii for the given ellipses at the specified angles
+    """
+
+    # ensure that all arrays have the right dimensions
+    radii = np.reshape(ellipses_np[:, 2:4], (-1, 2))  # make sure it's an n-by-2 matrix
+    ellipse_angle = np.reshape(ellipses_np[:, 4], (-1, 1))  # make sure it's a column vector
+    query_angles = np.reshape(query_angles, (1, -1))  # make sure it's a row vector
+
+    # calculate radii
+    a = np.deg2rad(query_angles - ellipse_angle)
+    prod = np.prod(radii, 1, keepdims=True)
+    sqr_sum = np.sqrt((radii[:, None, 0] * np.sin(a)) ** 2 + (radii[:, None, 1] * np.cos(a)) ** 2)  # None to keep dims
+
+    return prod / sqr_sum
+
+
+def visualize_result(img, ellipse, reference_ellipse, radii, angles, strain, marker_size=8):
+    """
+    Visualizes the strain detection result by drawing the detected ellipse on the image. Can also show specific radial
+    strain values at certain angles.
+    :param strain: The detected strain values
+    :param img: The image to draw the visualization on
+    :param ellipse: The detected ellipse to draw on the image. In OpenCV ellipse format: ((cx, cy), (r1, r2), angle)
+    :param reference_ellipse: the reference ellipse
+    :param radii: A list of calculated radii at different angles to be visualised with a dotted line and cross
+    :param angles: A list of the corresponding angles for the given radii
+    to either side of the ellipse center. Expecting one value per query angle
+    :param marker_size: The size of the markers indicating the centers and radial strain
+    :return: A copy of the given image with a visualization of the strain detection result drawn on top.
+    """
     if img is None or ellipse is None:
         return img
-    try:
-        img = np.copy(img)  # copy so we don't alter the original
-        cv.ellipse(img, ellipse, (255, 0, 0), 2)
-    except Exeption as ex:
-        logging.debug("Unable to draw ellipse: {}".format(ex))
+
+    img = np.copy(img)  # copy so we don't alter the original
+
+    # draw the reference ellipse
+    ref_color = (0, 255, 0)
+    draw_ellipse(img, reference_ellipse, ref_color, 1, True, 1)
+    # draw the fitted ellipse
+    fit_color = (255, 0, 0)
+    draw_ellipse(img, ellipse, fit_color, 2, True, 1)
+
+    # draw radial strain
+    strain_color = ((0, 127, 255), (127, 0, 255))
+    center, diam, angle = ellipse
+    for r, a, c in zip(radii, angles, strain_color):
+        p1, p2 = draw_diameter(img, center, r, a, c, 1)
+        draw_cross(img, p1, marker_size, a, c, 2)
+        draw_cross(img, p2, marker_size, a, c, 2)
+
+    # draw text
+    font = cv.FONT_HERSHEY_SIMPLEX
+    cv.putText(img, "Detected ellipse", (10, 40), font, 1, fit_color, 2)
+    cv.putText(img, "Reference ellipse", (10, 80), font, 1, ref_color, 2)
+    x_strain, y_strain, a_strain = strain * 100 - 100  # convert to engineering strain and split
+    cv.putText(img, "X strain: {:.2f}".format(x_strain), (10, 120), font, 1, strain_color[0], 2)
+    cv.putText(img, "Y strain: {:.2f}".format(y_strain), (10, 160), font, 1, strain_color[1], 2)
+    cv.putText(img, "Area strain: {:.2f}".format(a_strain), (10, 200), font, 1, (0, 0, 0), 2)
+
     return img
+
+
+if __name__ == '__main__':
+    # frame = np.ones((401, 401, 3), dtype=np.uint8)
+    # cx, cy = 180, 210
+    # ax1, ax2 = 100, 180
+    # angle = 20
+    # center = (cx, cy)
+    # axes = (ax1, ax2)
+    # cv.ellipse(frame, center, axes, angle, 0, 360, (255, 0, 0), -1)
+    # draw_diameter(frame, center, ax1, angle, (0, 255, 0), 1)
+    # draw_diameter(frame, center, ax2, angle+90, (0, 255, 0), 1)
+    # # cv.ellipse(frame, (center, axes, angle), (0, 0, 255), 1)
+    # gray = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
+    # thrsh, bw = cv.threshold(gray, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU)
+    # cnt, hier = cv.findContours(bw, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_NONE)
+    # ell = cv.fitEllipse(cnt[0])
+    # print(ell)
+    # cv.imshow("Test", frame)
+    # cv.waitKey()
+
+    import os
+
+    # test_image_folder = "D:/NERD output/NERD test 20200225-182457/DEA 1/Images/"
+    test_image_folder = "../../output/Test4/"
+    files = os.listdir(test_image_folder)
+
+    _strain_detector = StrainDetector()
+
+    for file in files:
+        fpath = os.path.join(test_image_folder, file)
+        if not os.path.isfile(fpath):
+            continue
+        _img = cv.imread(fpath)
+        print("File:", file)
+        _result_strain, _result_center_shift, _result_images = _strain_detector.get_dea_strain([_img])
+        print("Strain:", _result_strain[0, 0] * 100 - 100, " %    , ", _result_strain[0, 1] * 100 - 100, " %")
+        print("Shift:", _result_center_shift[0])
+
+        cv.imshow("Image", _result_images[0])
+        cv.waitKey(100)
+        cv.imwrite(os.path.join(test_image_folder + "Results", file), _result_images[0])
+
+    cv.destroyAllWindows()

@@ -122,6 +122,7 @@ class ImageCapture:
         # image capture settings
         self.desired_resolution = [1920, 1080]
         self.auto_reconnect = True
+        self.max_reconnect_attempts = 3
 
         # internal variables
         self._cameras = []
@@ -130,6 +131,7 @@ class ImageCapture:
         self._camera_states = []  # to indicate if a camera was lost (no longer able to grab images)
         self._cameras_available = []
         self._camera_selection = None
+        self._reconnect_attempt = 0
 
         # threading
         self._exit_flag = None
@@ -367,22 +369,43 @@ class ImageCapture:
         self.grab_images()
 
         if False in self._camera_states:
-            if self.auto_reconnect:
+            self.logging.warning("Unable to grab images")
+            if self.auto_reconnect and self._reconnect_attempt < self.max_reconnect_attempts:
+                self._reconnect_attempt += 1  # turn off so we don't keep reconnecting forever
+                self.logging.info("Reconnecting cameras (attempt {})...".format(self._reconnect_attempt))
                 self.reconnect_cameras()
-                self.auto_reconnect = False  # turn off so we don't keep reconnecting forever
+                frames = self.read_images()  # try again reading a new set of images
+                # this will also flush the images grabbed during reconnect, which tend to be white
             else:
-                self.logging.critical("Failed to reconnect. Shutting down")
-                raise Exception("Could not reconnect cameras")
+                if self._reconnect_attempt > 0:
+                    self.logging.critical("Failed to reconnect cameras. Shutting down...")
+                else:  # this means auto reconnect is off
+                    self.logging.critical("Connection to cameras lost and auto reconnect is disabled. Shutting down...")
+                raise Exception("Connection to cameras lost")
         else:
-            # all well, reconnect (if there was one) has succeeded, so if it happens again, we can try again
-            self.auto_reconnect = True
-
-        sucs, frames = self.retrieve_images()
+            # all well, reconnect (if there was one) has succeeded, so we can reset the attempt counter
+            self._reconnect_attempt = 0
+            sucs, frames = self.retrieve_images()
 
         if self.new_set_callback is not None:
             self.new_set_callback(frames, self.get_timestamps())
 
         return frames
+
+    def read_single(self, cam_id):
+        # check if is initialized
+        if self._camera_count == -1:  # not initialized yet  --> go find cameras
+            self.logging.info("ImageCapture not yet initialized. Initializing cameras...")
+            self.find_cameras()
+
+        cam = self.get_camera(cam_id)
+        if cam is not None:
+            self._camera_states[self._cameras.index(cam)] = cam.grab()
+            suc, frame = cam.retrieve()
+            if suc:
+                return frame
+
+        return None  # in case anything failed
 
     def get_images_from_buffer(self):
         """
