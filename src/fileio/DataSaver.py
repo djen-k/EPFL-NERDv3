@@ -52,7 +52,7 @@ class DataSaver:
         self.file.flush()
 
     def write_data(self, timestamp, target_voltage, measured_voltage, dea_state, test_state,
-                   strain=None, center_shift=None, resistance=None):
+                   strain=None, center_shift=None, resistance=None, image_saved=False):
 
         data = self.getDictField()
 
@@ -60,8 +60,9 @@ class DataSaver:
         data["target_voltage"] = target_voltage
         data["measured_voltage"] = measured_voltage
         data["test_state"] = test_state
-        if strain is not None:
+        if image_saved:
             data["imagefile"] = timestamp.strftime("%Y%m%d-%H%M%S")  # same as in image file name, to help find it
+
             # TODO: create option to choose channels (e.g. use only channels 1, 2, 5, 6)
         for i in range(self.nbDea):
             if dea_state is not None and i < len(dea_state):

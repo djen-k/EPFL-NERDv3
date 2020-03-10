@@ -83,8 +83,8 @@ def _setup(_comport, _camorder, _voltage):
         try:
             write_config(config_file_name, _comport, _camorder, _voltage)
             logging.info("Wrote config file")
-        except Exception:
-            logging.warning("Unable to write config file")
+        except Exception as ex:
+            logging.warning("Unable to write config file: {}".format(ex))
     else:
         logging.critical("No COM port or cam order selected")
         raise Exception("No COM port or cam order selected")
@@ -133,14 +133,14 @@ class NERD:
         max_voltage = self.voltage
         min_voltage = 300
         # TODO: check why min voltage is 300 V (officially 50, but doesn't always seem to work)
-        nsteps = 10
+        nsteps = 5
         voltage_step = max_voltage / nsteps
 
-        duration_low_s = 5
+        duration_low_s = 30
         duration_high_s = 1 * 60 * 60  # 1 h = 3600 s
         step_duration_s = 5
-        update_period_s = 1
-        image_capture_period = 60
+        measurement_period_s = 5
+        image_capture_period_s = 60 * 30  # every 30 min
 
         # prepare / compute what we need before applying voltage
         current_target_voltage = 0
@@ -159,7 +159,8 @@ class NERD:
         t = datetime.now()
         self.time_started = t
         time_last_state_change = t
-        time_last_image_taken = t
+        time_last_image_saved = t
+        time_last_measurement = t
         start_pause_time = t
         last_image_time = t
 
@@ -173,6 +174,8 @@ class NERD:
             # ------------------------------
             # state machine: actions (actually just outputs since all the interesting stuff happens on state change)
             # ------------------------------
+            dt_state_change = (now - time_last_state_change).total_seconds()  # time since last state change
+
             if current_state == STATE_STARTUP:
                 self.logging.info("Starting up state machine")
                 # wait for voltage to be 0 (in case it wasn't at start and needs time to decay)
@@ -182,16 +185,15 @@ class NERD:
                     time.sleep(0.1)
                     measuredVoltage = self.hvpsInst.get_current_voltage()
             elif current_state == STATE_WAITING_LOW:
-                msg = "waiting low: {:.0f}/{}s".format((now - time_last_state_change).total_seconds(), duration_low_s)
+                msg = "waiting low: {:.0f}/{}s".format(dt_state_change, duration_low_s)
                 self.logging.info(msg)
             elif current_state == STATE_STEPPING:
-                dt = (now - time_last_state_change).total_seconds()
                 msg = "Step {}/{}, current voltage: {} V, next step in {:.0f}/{} s"
-                msg = msg.format(current_step, nsteps, current_target_voltage, dt, step_duration_s)
+                msg = msg.format(current_step, nsteps, current_target_voltage, dt_state_change, step_duration_s)
                 self.logging.info(msg)
             elif current_state == STATE_WAITING_HIGH:
                 msg = "Waiting high: {:.0f}/{} s"
-                msg = msg.format((now - time_last_state_change).total_seconds(), duration_high_s)
+                msg = msg.format(dt_state_change, duration_high_s)
                 self.logging.info(msg)
             else:
                 logging.critical("Unknown state in the state machine")
@@ -200,14 +202,11 @@ class NERD:
             # ------------------------------
             # state machine: transitions
             # ------------------------------
-            image_due = False  # flag to indicate if we need to take a picture and measure strain
-
             new_state = current_state  # if nothing happens in the following conditions, we keep current state and step
             new_step = current_step
             new_target_voltage = current_target_voltage
-            dt_state_change = (now - time_last_state_change).total_seconds()  # time since last state change
             if current_state == STATE_STARTUP:
-                new_state = STATE_WAITING_LOW
+                new_state = STATE_STEPPING
             elif current_state == STATE_WAITING_LOW:
                 if dt_state_change > duration_low_s:
                     new_state = STATE_STEPPING
@@ -236,25 +235,29 @@ class NERD:
                 self.logging.debug("State changeing from {} (step {}) to {} (step {})".format(current_state,
                                                                                               current_step,
                                                                                               new_state, new_step))
-            dt_image_taken = (now - time_last_image_taken).total_seconds()  # time since last state change
-            image_required = dt_image_taken > image_capture_period
-            self.logging.debug("Time since last image: {} s,  New image required: {}".format(dt_image_taken,
-                                                                                             image_required))
 
-            # ------------------------------
-            # Record voltage and DEA state
-            # ------------------------------
-            measuredVoltage = self.hvpsInst.get_current_voltage()
-            self.logging.info("Current voltage: {} V".format(measuredVoltage))
+            dt_measurement = (now - time_last_measurement).total_seconds()  # time since last state change
+            measurement_due = dt_measurement > measurement_period_s or state_changing
+            # self.logging.debug("Time since last measurement: {} s,  measurement due: {}".format(dt_measurement,
+            #                                                                                     measurement_due))
 
-            deaState = self.hvpsInst.get_relay_state()
-            self.logging.info("DEA state: {}".format(deaState))
+            dt_image_saved = (now - time_last_image_saved).total_seconds()  # time since last state change
+            image_due = dt_image_saved > image_capture_period_s or state_changing
+            # self.logging.debug("Time since last image saved: {} s,  New image required: {}".format(dt_image_saved,
+            #                                                                                        image_due))
 
-            strain = None
-            center_shifts = None
-            if state_changing or image_required:
+            if measurement_due:
+                # ------------------------------
+                # Record voltage and DEA state
+                # ------------------------------
+                measuredVoltage = self.hvpsInst.get_current_voltage()
+                self.logging.info("Current voltage: {} V".format(measuredVoltage))
 
-                # -----------------------
+                deaState = self.hvpsInst.get_relay_state()
+                self.logging.info("DEA state: {}".format(deaState))
+
+                strain = None
+                center_shifts = None
                 # record, analyze, and store images
                 # -----------------------
 
@@ -264,28 +267,38 @@ class NERD:
                 # use timestamp of the last image for the whole set so they have a realistic and matching timestamp
                 # timestamp = cap.get_timestamps(cap.get_camera_count() - 1)
 
-                # get image name suffix
-                suffix = "{}V".format(measuredVoltage)  # store voltage in file name
-                if current_state == STATE_STARTUP:
-                    suffix += " reference"  # this is the first image we're storing, so it will be the reference
-
-                # save images first so if strain detection fails, we can check the image that caused the failure
-                imsaver.save_all(images=imgs, timestamp=now, suffix=suffix)
-
                 # fit ellipses
                 strain, center_shifts, res_imgs, outliers = strain_detector.get_dea_strain(imgs, True, True)
                 if any(outliers):
                     self.logging.warning("Outlier detected")
                 # TODO: handle outliers (don't save data or mark in output file)
 
-                # save result images
-                imsaver.save_all(res_images=res_imgs, timestamp=now, suffix=suffix)
-
                 # print average strain for each DEA
                 self.logging.info("strain: {}".format(np.reshape(np.mean(strain, 1), (1, -1))))
 
-                # use now instead of t_img to make sure we have consistent timestamp for all data recorded in this cycle
-                time_last_image_taken = now
+                # ------------------------------
+                # Save all data voltage and DEA state
+                # ------------------------------
+                # todo: write elapsed time in seconds to output file
+                # todo compute total time at max voltage
+                saver.write_data(now, current_target_voltage, measuredVoltage, deaState,
+                                 current_state, strain, center_shifts, image_saved=image_due)
+
+                time_last_measurement = now
+
+                # -----------------------
+                # save images
+                # -----------------------
+                if image_due:
+                    # get image name suffix
+                    suffix = "{}V".format(measuredVoltage)  # store voltage in file name
+                    if current_state == STATE_STARTUP:
+                        suffix += " reference"  # this is the first image we're storing, so it will be the reference
+
+                    # save result images
+                    imsaver.save_all(images=imgs, res_images=res_imgs, timestamp=now, suffix=suffix)
+                    # use now instead of t_img to make sure we have consistent timestamp for all data in this cycle
+                    time_last_image_saved = now
 
                 # -----------------------
                 # show images
@@ -299,14 +312,6 @@ class NERD:
                         cv.imshow('DEA {}'.format(i), cv.resize(res_imgs[i], (0, 0), fx=0.35, fy=0.35))
 
             # ------------------------------
-            # Save all data voltage and DEA state
-            # ------------------------------
-            # todo: write elapsed time in seconds to output file
-            # todo compute total time at max voltage
-            saver.write_data(now, current_target_voltage, measuredVoltage, deaState,
-                             current_state, strain, center_shifts)
-
-            # ------------------------------
             # Apply state change and update voltage
             # ------------------------------
             if state_changing:
@@ -318,8 +323,8 @@ class NERD:
 
                 current_state = new_state
                 current_step = new_step
-                time_last_state_change = datetime.now()
-                time_last_image_taken = time_last_state_change  # also reset image timer to avoid taking too many
+                time_last_state_change = now
+                time_last_image_saved = time_last_state_change  # also reset image timer to avoid taking too many
 
             # ------------------------------
             # Keep track of voltage changes
@@ -328,11 +333,10 @@ class NERD:
             #     self.callbackVoltageChange(newVoltage=current_target_voltage)
 
             # ------------------------------
-            # keep tack of time
+            # check for user input to stay responsive
             # ------------------------------
-            # self.currentTimeSinceVoltageW.setText("{}s".format(int(time.time() - self.timeStarted)))
-            # time.sleep(self.plotUpdatePeriod_s)
-            if cv.waitKey(update_period_s * 1000) & 0xFF == ord('q'):
+
+            if cv.waitKey(300) & 0xFF == ord('q'):
                 self.shutdown_flag = True
 
         self.logging.critical("Exiting...")
