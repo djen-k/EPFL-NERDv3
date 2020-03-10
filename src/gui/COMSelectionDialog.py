@@ -1,13 +1,13 @@
 from PyQt5 import QtWidgets, QtSerialPort, QtCore
 
 
-class COMSelection(QtWidgets.QDialog):
+class COMSelectionDialog(QtWidgets.QDialog):
     """
     This class is a dialog window asking the user for COM port
     """
 
     def __init__(self, parent=None):
-        super(COMSelection, self).__init__(parent)
+        super(COMSelectionDialog, self).__init__(parent)
 
         # add combo box
         self.portname_comboBox_comport1 = QtWidgets.QComboBox()

@@ -3,6 +3,8 @@ import logging
 import cv2 as cv
 import numpy as np
 
+logger = logging.getLogger("Strain Detection")
+
 
 class StrainDetector:
 
@@ -10,35 +12,78 @@ class StrainDetector:
 
         self.logging = logging.getLogger("StrainDetector")
 
+        self._reference_images = None
         self._reference_ellipses = None
+        self._exclude_masks = None  # masks defining areas to exclude (for faster electrode outline detection)
         self._reference_radii = None
         self._reference_centers = None
-        self._flag_setting_reference = False
-        self._query_angles = np.array([0, 90])
+
+        self.query_angles = np.array([0, 90])
+        self._strain_threshold = 1.3  # above 50 % strain can be considered an outlier
+        self._neg_strain_threshold = 0.9  # below -10 % strain can be considered an outlier
+        self._shift_threshold = 100  # above 100 px shift along either axis can be considered an outlier
 
     def set_reference(self, reference_images):
+        self._reference_images = None
         self._reference_ellipses = None
+        self._exclude_masks = None
         self._reference_radii = None
         self._reference_centers = None
-        self._flag_setting_reference = True
-        self.get_dea_strain(reference_images)
 
-    def get_dea_strain(self, imgs, output_result_image=True):
+    def get_deviation_from_reference(self, images):
+        if self._reference_images is None:
+            self.logging.debug("No reference set, therefore deviation is 0.")
+            return [0] * len(images)
+        else:
+            return [get_image_deviation(img, ref) for img, ref in zip(images, self._reference_images)]
 
-        # TODO: deal with mismatch in n of images and n of references
+    def get_dea_strain(self, imgs, output_result_image=False, check_outliers=False):
 
-        ellipses = [dea_fit_ellipse(img) for img in imgs]  # get fit for each DEA
+        n_img = len(imgs)
+
+        # TODO: make sure the algorithm is robust to Nones
+        if self._reference_images is not None and n_img != len(self._reference_images):
+            raise Exception("Need to specify one image for each reference image! Set elements to None where no image is"
+                            "available for a reference")
+
+        # indication if any of the samples must be considered an outlier
+        outlier = np.array([False] * len(imgs))
+
+        # check if image deviation is too large
+        if check_outliers:
+            if self._reference_images is not None:
+                img_dev = self.get_deviation_from_reference(imgs)
+                self.logging.debug("Image deviations: {}".format(img_dev))
+                outlier = np.bitwise_or(outlier, np.array(img_dev) > 0.5)
+
+        # initialize lists to store results
+        ellipses = [None] * n_img
+        if self._exclude_masks is None:
+            self._exclude_masks = [None] * n_img
+        masks = self._exclude_masks
+
+        # get fit for each DEA
+        for i in range(n_img):
+            ellipse, mask = dea_fit_ellipse(imgs[i], self._exclude_masks[i])
+            ellipses[i] = ellipse
+            masks[i] = mask
+
+            # mark as outlier if no ellipse was found
+            if ellipse is None:
+                outlier[i] = True
+
         # calculate strain and center shift
         ellipses_np = ellipses_to_numpy_array(ellipses)  # get as numpy array
-        xy_radii = ellipse_radius_at_angle(ellipses_np, self._query_angles)
+        xy_radii = ellipse_radius_at_angle(ellipses_np, self.query_angles)
         centers = ellipses_np[:, 0:2]
 
         # if there is not yet any reference for strain measurements, set these ellipses as the reference
         if self._reference_ellipses is None:
-            if not self._flag_setting_reference:
-                self.logging.warning("No strain reference has been set yet. The given images will be set as reference.")
-            else:
-                self.logging.info("A new strain reference was set")
+            if np.any(ellipses_np == np.nan) or any(outlier):
+                self.logging.critical("Invalid reference! Cannot proceed without a valid reference!")
+            # if not explicitly calling set_reference, print a warning that a new reference is being set
+            self.logging.info("No strain reference has been set yet. The given images will be set as reference.")
+            self._reference_images = imgs
             self._reference_ellipses = ellipses
             self._reference_radii = xy_radii
             self._reference_centers = centers
@@ -49,12 +94,28 @@ class StrainDetector:
         strain_all = np.concatenate((strain, np.reshape(strain_area, (-1, 1))), axis=1)
         center_shift = centers - self._reference_centers
 
+        # check if strain is too large
+        if check_outliers:
+            strain_out = np.bitwise_or(strain > self._strain_threshold, strain < self._neg_strain_threshold)
+            strain_out = np.any(strain_out, axis=1)
+            outlier = np.bitwise_or(outlier, strain_out)
+            shift_out = np.abs(center_shift) > self._shift_threshold
+            shift_out = np.any(shift_out, axis=1)
+            outlier = np.bitwise_or(outlier, shift_out)
+
+        # update exclude masks
+        for i in range(n_img):
+            if check_outliers and outlier[i]:
+                masks[i] = None  # keeps it from saving this mask if it belongs to an outlier
+            if masks[i] is not None:
+                self._exclude_masks[i] = masks[i]
+
         res_imgs = None
         if output_result_image:
-            res_imgs = [visualize_result(imgs[i], ellipses[i], self._reference_ellipses[i], tuple(xy_radii[i, :]),
-                                         tuple(self._query_angles), strain_all[i, :]) for i in range(len(imgs))]
+            res_imgs = [visualize_result(imgs[i], ellipses[i], tuple(xy_radii[i, :]), tuple(self.query_angles),
+                                         self._reference_ellipses[i], strain_all[i, :]) for i in range(len(imgs))]
 
-        return strain, center_shift, res_imgs
+        return strain, center_shift, res_imgs, outlier
 
 
 def draw_ellipse(img, ellipse, color, line_width, draw_axes=False, axis_line_width=1):
@@ -126,7 +187,7 @@ def get_binary_image(img, closing_radius):
         d = 2 * closing_radius + 1
         kernel = cv.getStructuringElement(cv.MORPH_ELLIPSE, (d, d))
         bw = cv.morphologyEx(bw, cv.MORPH_CLOSE, kernel)
-
+        bw = cv.morphologyEx(bw, cv.MORPH_OPEN, kernel)
     return bw
 
 
@@ -150,8 +211,6 @@ def find_contour(bw, center=None):
         if cv.pointPolygonTest(cnt, center, False) == 1:
             return cnt
 
-    logging.warning("did not find any object at the center of the image")
-
     # if no contour contained the center, return largest one
     best_cont = None
     max_area = 0
@@ -160,6 +219,12 @@ def find_contour(bw, center=None):
         if a > max_area:
             best_cont = cnt
             max_area = a
+
+    if best_cont is None:
+        logger.warning("No contour found.")
+    else:
+        logger.warning("Did not find any object at the center of the image. The largest contour is returned instead.")
+
     return best_cont
 
 
@@ -174,8 +239,7 @@ def get_ellipse_mask(ellipse, img_shape, offset=0):
     # create image
     mask = np.zeros((img_shape[0], img_shape[1]), dtype=np.uint8)
     # draw ellipse
-    cv.ellipse(mask, ellipse, (255, 255, 255), -1)  # use this version of the function which takes the ellipse as
-    # returned by fitEllipse (as floats and diameter instead of radius
+    draw_ellipse(mask, ellipse, (255, 255, 255), -1)
 
     # dilate/erode by given offset, if necessary
     if offset != 0:
@@ -193,7 +257,107 @@ def get_ellipse_mask(ellipse, img_shape, offset=0):
     return mask
 
 
-def approximate_electrode_area(img_bw, iterations=10, center=None):
+def dea_fit_ellipse(img, mask=None, closing_radius=10, algorithm=1):
+    if img is None:
+        return None, None
+
+    # binarize
+    img_bw = get_binary_image(img, closing_radius)
+
+    if algorithm is 0:
+        mask = approximate_electrode_outline(img_bw)
+        ellipse = refine_electrode_outline(img_bw, mask)
+    else:
+        ellipse, mask = find_electrode_outline(img_bw, mask)
+    return ellipse, mask
+
+
+def find_electrode_outline(img_bw, exclude_mask=None, iterations=20, center=None):
+    if img_bw is None:
+        logger.warning("No binary image specified!")
+        return None, None
+
+    # If no mask is specified, create one with no exclusions
+    if exclude_mask is None:
+        exclude_mask = np.zeros(img_bw.shape, dtype=np.uint8)
+
+    # get contours
+    cont = find_contour(img_bw, center)
+    ellipse = None
+    old_area = np.nan
+    new_area = np.nan
+    converged = False
+    i = 0
+    while not converged:  # continue until area change per iteration is less than 1 %
+        # exclude regions of contour
+        cont_in = exclude_contour_points(cont, exclude_mask)
+        # fit ellipse
+        if cont_in is None or len(cont_in) < 5:
+            logger.warning("Unable to fit ellipse because no outline was found.")
+            if np.any(exclude_mask > 0):  # if any exclusions were applied
+                exclude_mask = np.zeros(img_bw.shape, dtype=np.uint8)  # reset mask and try again
+                logger.warning("Trying again without any exclusions.")
+                continue
+            return None, None  # if we can't fit an ellipse and there was no mask applied, we have to abort
+
+        ellipse = cv.fitEllipseDirect(cont_in)
+        # calculate area to determine convergence
+        old_area = new_area
+        new_area = ellipse[1][0] * ellipse[1][1]  # pseudo area (no need to bother multiplying by pi)
+
+        # create ellipse mask and apply inverse to image to create exclude mask
+        ellipse_mask = get_ellipse_mask(ellipse, img_bw.shape, 25)
+        exclude_mask = cv.bitwise_and(img_bw, cv.bitwise_not(ellipse_mask))
+
+        # dilate exclude mask to overlap ellipse contour
+        operation = cv.MORPH_DILATE
+        n = 61
+        kernel = cv.getStructuringElement(cv.MORPH_ELLIPSE, (n, n))
+        exclude_mask = cv.morphologyEx(exclude_mask, operation, kernel)
+
+        # count iterations to abort after a while if the result does not converge for some reason
+        i += 1
+        if i >= iterations:
+            break
+
+        converged = (old_area - new_area) / old_area < 0.0001
+
+    if i < iterations:
+        logger.debug("Electrode outline detection converged after {} iterations".format(i))
+    else:
+        logger.warning("Electrode outline detection did not converge. Aborted after {} iterations".format(i))
+
+    return ellipse, exclude_mask
+
+
+def exclude_contour_points(contour, exclude_mask):
+    if contour is None or exclude_mask is None:
+        return contour
+
+    # draw white contour 1 pixel wide on black background
+    img = np.zeros(exclude_mask.shape, dtype=np.uint8)
+    cv.drawContours(img, [contour], 0, (255, 255, 255), thickness=1)  # draw contour in white
+    # make excluded areas black (erase contour in those areas)
+    img = np.bitwise_and(img, np.bitwise_not(exclude_mask))
+    # find all remaining white pixels
+    points = np.nonzero(img)
+    x = points[1].reshape((-1, 1))
+    y = points[0].reshape((-1, 1))
+    points = np.concatenate((x, y), axis=1)
+
+    # exclude any points on the image border
+    width = exclude_mask.shape[1]
+    height = exclude_mask.shape[0]
+    on_border = np.any(np.concatenate((x == 0, x == width - 1, y == 0, y == height - 1), axis=1), axis=1)
+    points = points[np.bitwise_not(on_border), :]
+
+    # put in the right contour shape
+    points = np.reshape(points, (-1, 1, 2))
+
+    return points
+
+
+def approximate_electrode_outline(img_bw, iterations=20, center=None):
     """
     Iteratively approximate the electrode area in the given binary image.
     :param img_bw: The binary image
@@ -203,9 +367,9 @@ def approximate_electrode_area(img_bw, iterations=10, center=None):
              the ellipse description ((cx, cy), (ra, rb), angle)
              the outline of the electrodes masked by the returned mask
     """
+    # TODO: check if copy is redundant
     img_bw_orig = np.copy(img_bw)
     mask = None
-    ellipse = None
     area = np.nan
     new_area = np.nan
     i = 0
@@ -226,93 +390,93 @@ def approximate_electrode_area(img_bw, iterations=10, center=None):
         if i >= iterations:
             break
 
-    return mask, ellipse
+    return mask
 
 
-def dea_fit_ellipse(img, closing_radius=5):
-    if img is None:
-        return None
+def refine_electrode_outline(img_bw, mask):
+    # get contour of the ellipse mask
+    ell_cont, hierarchy = cv.findContours(mask, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_NONE)
+    ell_cont = ell_cont[0]  # there can be only one contour
+    # get centroid of the contour
+    m = cv.moments(ell_cont)
+    cx = int(m["m10"] / m["m00"])
+    cy = int(m["m01"] / m["m00"])
+    center = (cx, cy)
 
-    try:
-        # binarize
-        img_bw_orig = get_binary_image(img, closing_radius)
+    # get apply mask to input image and get contour
+    img_bw = cv.bitwise_and(img_bw, mask)
+    cont = find_contour(img_bw, center)
 
-        # make copy to keep original2
-        img_bw = np.copy(img_bw_orig)
+    # visualize result
+    # img_col = cv.cvtColor(img_bw, cv.COLOR_GRAY2BGR)
+    # cv.drawContours(img_col, cont, -1, (255, 0, 0), 3)
+    # cv.drawContours(img_col, ell_cont, -1, (0, 255, 0), 3)
+    # cv.imshow("Image", img_col)
+    # cv.waitKey()
 
-        mask, ellipse = approximate_electrode_area(img_bw)
-        img_bw = cv.bitwise_and(img_bw_orig, mask)
-        cont = find_contour(img_bw, ellipse[0])
-        ell_cont, hierarchy = cv.findContours(mask, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_NONE)
-        ell_cont = ell_cont[0]  # there can be only one contour
+    # check contour against ellipse contour
+    contour = np.squeeze(cont)
+    exclude_contour = np.squeeze(ell_cont)
+    is_on_ellipse = np.zeros((contour.shape[0]), dtype=bool)
+    for i1 in range(0, contour.shape[0]):
+        if (exclude_contour == contour[i1, :]).all(axis=1).any():
+            is_on_ellipse[i1] = True
+    is_included = np.logical_not(is_on_ellipse)
+    # post-process excluded region (convert to BW image and use morphological operations)
+    is_included = np.array(is_included * 255, dtype=np.uint8)  # to bw image
+    is_included = np.reshape(is_included, (-1, 1))
+    # close small gaps in the contour (random peaks that got excluded)
+    strel = cv.getStructuringElement(cv.MORPH_RECT, (1, 51))
+    is_included = cv.morphologyEx(is_included, cv.MORPH_CLOSE, strel)
+    strel = cv.getStructuringElement(cv.MORPH_RECT, (1, 51))
+    is_included = cv.morphologyEx(is_included, cv.MORPH_OPEN, strel)
+    # extend excluded regions
+    strel = cv.getStructuringElement(cv.MORPH_RECT, (1, 201))
+    is_included = cv.morphologyEx(is_included, cv.MORPH_ERODE, strel)
+    is_included = is_included > 0
+    is_included = np.reshape(is_included, (-1))
+    # find islands
+    incl_diff = np.diff(np.array(is_included, dtype=np.int8))
+    i_start = np.nonzero(incl_diff > 0)[0]
+    i_end = np.nonzero(incl_diff < 0)[0]
+    # fix length mismatch (in case a transition is at the beginning/end of the data and no caught by diff)
+    if len(i_start) < len(i_end):  # fewer starts than ends
+        i_start = np.insert(i_start, 0, 0)  # first block starts at index 0
+    elif len(i_start) > len(i_end):  # fewer ends than starts
+        i_end = np.append(i_end, len(is_included) - 1)  # last block ends at last index
+    # if lengths still don't match, we have a problem!
+    if len(i_start) != len(i_end):
+        raise ValueError("can't match start and end of included regions")
+    if len(i_start) != 3:
+        logger.warning("Expected 3 contour regions to include. Found: {}".format(len(i_start)))
+    # TODO: solve this problem properly! Not just catch the error
+    if i_start[0] > i_end[0]:  # start and end don't match -> shift order to match them
+        i_end = np.roll(i_end, -1)
+    # include_regions = np.concatenate(i_start, i_end, axis=1)  # combine matched start and end indices
+    contour_split = []
+    for i in range(len(i_start)):
+        if i_start[i] < i_end[i]:  # the normal case, where start and end are in order
+            section = cont[i_start[i] + 1:i_end[i] + 1, :]
+        else:
+            s1 = cont[i_start[i] + 1:, :]
+            s2 = cont[:i_end[i] + 1, :]
+            section = np.append(s1, s2, axis=1)
 
-        # check contour against ellipse contour
-        cont = np.squeeze(cont)
-        ell_cont = np.squeeze(ell_cont)
-        is_on_ellipse = np.zeros((cont.shape[0]), dtype=bool)
-        for i1 in range(0, cont.shape[0]):
-            if (ell_cont == cont[i1, :]).all(axis=1).any():
-                is_on_ellipse[i1] = True
-        is_included = np.logical_not(is_on_ellipse)
+        contour_split.append(np.reshape(section, (-1, 1, 2)))
+    # stitch together to get ellipse fit
+    cont_stitched = np.concatenate(contour_split)
+    ellipse = cv.fitEllipseDirect(cont_stitched)
+    return ellipse
 
-        # post-process excluded region (convert to BW image and use morphological operations)
-        is_included = np.array(is_included * 255, dtype=np.uint8)  # to bw image
-        is_included = np.reshape(is_included, (-1, 1))
-        # close small gaps in the contour (random peaks that got excluded)
-        strel = cv.getStructuringElement(cv.MORPH_RECT, (1, 51))
-        is_included = cv.morphologyEx(is_included, cv.MORPH_CLOSE, strel)
-        strel = cv.getStructuringElement(cv.MORPH_RECT, (1, 51))
-        is_included = cv.morphologyEx(is_included, cv.MORPH_OPEN, strel)
-        # extend excluded regions
-        strel = cv.getStructuringElement(cv.MORPH_RECT, (1, 201))
-        is_included = cv.morphologyEx(is_included, cv.MORPH_ERODE, strel)
-        is_included = is_included > 0
 
-        is_included = np.reshape(is_included, (-1))
+def get_image_deviation(img1, img2):
+    if img1 is None or img2 is None:
+        logger.warning("Image if None, therefore deviation is 0.")
+        return 0
 
-        # find islands
-        incl_diff = np.diff(np.array(is_included, dtype=np.int8))
-        i_start = np.nonzero(incl_diff > 0)[0]
-        i_end = np.nonzero(incl_diff < 0)[0]
-
-        # fix length mismatch (in case a transition is at the beginning/end of the data and no caught by diff)
-        if len(i_start) < len(i_end):  # fewer starts than ends
-            i_start = np.insert(i_start, 0, 0)  # first block starts at index 0
-        elif len(i_start) > len(i_end):  # fewer ends than starts
-            i_end = np.append(i_end, len(is_included) - 1)  # last block ends at last index
-
-        # if lengths still don't match, we have a problem!
-        if len(i_start) != len(i_end):
-            raise ValueError("can't match start and end of included regions")
-        if len(i_start) != 3:
-            logging.warning("Expected 3 contour regions to include. Found: {}".format(len(i_start)))
-
-        # TODO: solve this problem properly! Not just catch the error
-        if i_start[0] > i_end[0]:  # start and end don't match -> shift order to match them
-            i_end = np.roll(i_end, -1)
-        # include_regions = np.concatenate(i_start, i_end, axis=1)  # combine matched start and end indices
-
-        contour_split = []
-        for i in range(len(i_start)):
-            if i_start[i] < i_end[i]:  # the normal case, where start and end are in order
-                section = cont[i_start[i] + 1:i_end[i] + 1, :]
-            else:
-                s1 = cont[i_start[i] + 1:, :]
-                s2 = cont[:i_end[i] + 1, :]
-                section = np.append(s1, s2, axis=1)
-
-            contour_split.append(np.reshape(section, (-1, 1, 2)))
-
-        # stitch together to get ellipse fit
-        cont_stitched = np.concatenate(contour_split)
-
-        ellipse = cv.fitEllipseDirect(cont_stitched)
-
-        return ellipse
-
-    except Exception as ex:
-        logging.warning("unable to fit ellipse {}".format(ex))
-        return None
+    cumdev = np.sum(np.abs(img1 - img2))
+    dev_per_pixel = cumdev / 255 / np.prod(img1.shape)
+    return dev_per_pixel
 
 
 def ellipses_to_numpy_array(ellipses):
@@ -365,7 +529,7 @@ def ellipse_radius_at_angle(ellipses_np, query_angles):
     return prod / sqr_sum
 
 
-def visualize_result(img, ellipse, reference_ellipse, radii, angles, strain, marker_size=8):
+def visualize_result(img, ellipse, radii=None, angles=None, reference_ellipse=None, strain=None, marker_size=8):
     """
     Visualizes the strain detection result by drawing the detected ellipse on the image. Can also show specific radial
     strain values at certain angles.
@@ -384,29 +548,36 @@ def visualize_result(img, ellipse, reference_ellipse, radii, angles, strain, mar
 
     img = np.copy(img)  # copy so we don't alter the original
 
-    # draw the reference ellipse
-    ref_color = (0, 255, 0)
-    draw_ellipse(img, reference_ellipse, ref_color, 1, True, 1)
-    # draw the fitted ellipse
     fit_color = (255, 0, 0)
+    ref_color = (0, 255, 0)
+    strain_color = ((0, 127, 255), (127, 0, 255))
+
+    # draw the reference ellipse
+    if reference_ellipse is not None:
+        draw_ellipse(img, reference_ellipse, ref_color, 1, True, 1)
+
+    # draw the fitted ellipse
     draw_ellipse(img, ellipse, fit_color, 2, True, 1)
 
     # draw radial strain
-    strain_color = ((0, 127, 255), (127, 0, 255))
-    center, diam, angle = ellipse
-    for r, a, c in zip(radii, angles, strain_color):
-        p1, p2 = draw_diameter(img, center, r, a, c, 1)
-        draw_cross(img, p1, marker_size, a, c, 2)
-        draw_cross(img, p2, marker_size, a, c, 2)
+    if radii is not None and angles is not None:
+        center, diam, angle = ellipse
+        for r, a, c in zip(radii, angles, strain_color):
+            p1, p2 = draw_diameter(img, center, r, a, c, 1)
+            draw_cross(img, p1, marker_size, a, c, 2)
+            draw_cross(img, p2, marker_size, a, c, 2)
 
     # draw text
     font = cv.FONT_HERSHEY_SIMPLEX
-    cv.putText(img, "Detected ellipse", (10, 40), font, 1, fit_color, 2)
-    cv.putText(img, "Reference ellipse", (10, 80), font, 1, ref_color, 2)
-    x_strain, y_strain, a_strain = strain * 100 - 100  # convert to engineering strain and split
-    cv.putText(img, "X strain: {:.2f}".format(x_strain), (10, 120), font, 1, strain_color[0], 2)
-    cv.putText(img, "Y strain: {:.2f}".format(y_strain), (10, 160), font, 1, strain_color[1], 2)
-    cv.putText(img, "Area strain: {:.2f}".format(a_strain), (10, 200), font, 1, (0, 0, 0), 2)
+    if reference_ellipse is not None:
+        cv.putText(img, "Detected ellipse", (10, 40), font, 1, fit_color, 2)
+        cv.putText(img, "Reference ellipse", (10, 80), font, 1, ref_color, 2)
+
+    if strain is not None:
+        x_strain, y_strain, a_strain = strain * 100 - 100  # convert to engineering strain and split
+        cv.putText(img, "r1 strain: {:.2f} %".format(x_strain), (10, 120), font, 1, strain_color[0], 2)
+        cv.putText(img, "r2 strain: {:.2f} %".format(y_strain), (10, 160), font, 1, strain_color[1], 2)
+        cv.putText(img, "Area strain: {:.2f} %".format(a_strain), (10, 200), font, 1, (0, 0, 0), 2)
 
     return img
 
@@ -421,7 +592,7 @@ if __name__ == '__main__':
     # cv.ellipse(frame, center, axes, angle, 0, 360, (255, 0, 0), -1)
     # draw_diameter(frame, center, ax1, angle, (0, 255, 0), 1)
     # draw_diameter(frame, center, ax2, angle+90, (0, 255, 0), 1)
-    # # cv.ellipse(frame, (center, axes, angle), (0, 0, 255), 1)
+    # cv.ellipse(frame, (center, axes, angle), (0, 0, 255), 1)
     # gray = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
     # thrsh, bw = cv.threshold(gray, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU)
     # cnt, hier = cv.findContours(bw, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_NONE)
@@ -431,25 +602,38 @@ if __name__ == '__main__':
     # cv.waitKey()
 
     import os
+    import time
+    from libs import duallog
+
+    duallog.setup("logs", minlevelConsole=logging.DEBUG, minLevelFile=logging.DEBUG)
 
     # test_image_folder = "D:/NERD output/NERD test 20200225-182457/DEA 1/Images/"
-    test_image_folder = "../../output/Test4/"
+    test_image_folder = "../../output/Test1/"
     files = os.listdir(test_image_folder)
 
     _strain_detector = StrainDetector()
 
+    tic = time.perf_counter()
     for file in files:
         fpath = os.path.join(test_image_folder, file)
         if not os.path.isfile(fpath):
             continue
         _img = cv.imread(fpath)
         print("File:", file)
-        _result_strain, _result_center_shift, _result_images = _strain_detector.get_dea_strain([_img])
+        _result_strain, _result_center_shift, \
+        _result_images, _outlier = _strain_detector.get_dea_strain([_img], True, True)
+        print("Outlier: ", _outlier)
+
         print("Strain:", _result_strain[0, 0] * 100 - 100, " %    , ", _result_strain[0, 1] * 100 - 100, " %")
         print("Shift:", _result_center_shift[0])
+        # _ellipse, _mask = dea_fit_ellipse(_img)
+        # _res_img = visualize_result(_img, _ellipse)
+        # _result_images = [_res_img]
 
         cv.imshow("Image", _result_images[0])
-        cv.waitKey(100)
+        cv.waitKey()
         cv.imwrite(os.path.join(test_image_folder + "Results", file), _result_images[0])
 
     cv.destroyAllWindows()
+    toc = time.perf_counter()
+    print("elapsed time: ", toc - tic)

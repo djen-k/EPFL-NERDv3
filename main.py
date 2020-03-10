@@ -14,7 +14,7 @@ from src.fileio.ImageSaver import ImageSaver
 from src.fileio.config import read_config, write_config
 from src.gui import SetupDialog
 from src.hvps import NERDHVPS
-from src.image_processing import ImageCapture
+from src.image_processing import ImageCapture, StrainDetection
 
 
 class App(QMainWindow):
@@ -67,8 +67,8 @@ def _setup(_comport, _camorder, _voltage):
     try:
         _comport, _camorder, _voltage = read_config(config_file_name)
         logging.info("Read config file")
-    except Exception:
-        logging.warning("Unable to read config file")
+    except Exception as ex:
+        logging.warning("Unable to read config file: {}".format(ex))
 
     # Show setup dialog to get COM port and camera order
     setup_dialog = SetupDialog.SetupDialog(com_port_default=_comport, cam_order_default=_camorder,
@@ -102,8 +102,10 @@ class NERD:
         self.image_cap = ImageCapture.SharedInstance
         # TODO: implement robust system for getting number of DEAs and dealing with unexpected number of images etc.
         self.n_dea = self.image_cap.get_camera_count()  # this works if we previously selected the cameras
+
         self.hvpsInst = NERDHVPS.init_hvps(self.comport)
         self.hvpsInst.set_relay_auto_mode()  # enable auto mode by default
+        self.hvpsInst.set_switching_mode(1)  # set to DC mode by default to make sure that the HV indicator LED works
         self.shutdown_flag = False
         self.time_started = None
         self.time_paused = timedelta(0)
@@ -124,6 +126,8 @@ class NERD:
         # TODO: handle varying numbers of DEAs
         save_file_name = "{}/{} data.csv".format(dir_name, session_name)
         saver = DataSaver(self.n_dea, save_file_name)
+
+        strain_detector = StrainDetection.StrainDetector()
 
         # get settings/values from user
         max_voltage = self.voltage
@@ -269,13 +273,13 @@ class NERD:
                 imsaver.save_all(images=imgs, timestamp=now, suffix=suffix)
 
                 # fit ellipses
-                fits, res_imgs = get_ellipse_fits(imgs)
+                strain, center_shifts, res_imgs, outliers = strain_detector.get_dea_strain(imgs, True, True)
+                if any(outliers):
+                    self.logging.warning("Outlier detected")
+                # TODO: handle outliers (don't save data or mark in output file)
 
                 # save result images
                 imsaver.save_all(res_images=res_imgs, timestamp=now, suffix=suffix)
-
-                # calculate strain and center shift
-                strain, center_shifts = self.calculate_strain(fits)
 
                 # print average strain for each DEA
                 self.logging.info("strain: {}".format(np.reshape(np.mean(strain, 1), (1, -1))))
@@ -290,9 +294,9 @@ class NERD:
                 for i in range(len(res_imgs)):
                     if res_imgs[i] is None:
                         cv.imshow('DEA {}'.format(i), cv.resize(ImageCapture.ImageCapture.IMG_NOT_AVAILABLE, (0, 0),
-                                                                fx=0.25, fy=0.25))
+                                                                fx=0.35, fy=0.35))
                     else:
-                        cv.imshow('DEA {}'.format(i), cv.resize(res_imgs[i], (0, 0), fx=0.25, fy=0.25))
+                        cv.imshow('DEA {}'.format(i), cv.resize(res_imgs[i], (0, 0), fx=0.35, fy=0.35))
 
             # ------------------------------
             # Save all data voltage and DEA state

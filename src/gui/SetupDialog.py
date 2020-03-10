@@ -26,7 +26,7 @@ class SetupDialog(QtWidgets.QDialog):
         n_rows = 2
         n_cols = 3
 
-        self._default_img_size = [640, 360]
+        self._default_img_size = [800, 450]  # [640, 360]
 
         # register callback
         # image_capture.set_new_image_callback(self.updateImage)
@@ -249,11 +249,11 @@ class SetupDialog(QtWidgets.QDialog):
                 if self.btnPreview.isChecked():
                     img = images[i_cam]
                     try:
-                        ellipse = StrainDetection.dea_fit_ellipse(img, 5)
+                        ellipse, mask = StrainDetection.dea_fit_ellipse(img)
                         img = StrainDetection.visualize_result(img, ellipse)
-                        self.logging.debug("Electrode area for DEA {}: {}".format(i_dea, ellipse))
+                        self.logging.debug("Electrode area for DEA {}: {}".format(i_dea + 1, ellipse))
                     except Exception as ex:
-                        self.logging.warning("Failed to detect electrode area for DEA {}! ({})".format(i_dea, ex))
+                        self.logging.warning("Failed to detect electrode area for DEA {}! ({})".format(i_dea + 1, ex))
                         pass
                     self.setImage(i_dea, img)
                 else:
@@ -262,10 +262,14 @@ class SetupDialog(QtWidgets.QDialog):
                 self.setImage(i_dea, ImageCapture.ImageCapture.IMG_NOT_AVAILABLE)
 
     def setImage(self, i_dea, opencv_image, img_size=None):
+        label = self.lbl_image[i_dea]
+
         if img_size is None:
-            img_size = self._default_img_size
-        self.lbl_image[i_dea].setPixmap(QtImageTools.conv_Qt(opencv_image, img_size))
-        self.logging.debug("Set new image for DEA {}".format(i_dea+1))
+            # img_size = self._default_img_size
+            img_size = (label.size().width(), label.size().height())
+
+        label.setPixmap(QtImageTools.conv_Qt(opencv_image, img_size))
+        self.logging.debug("Set new image for DEA {}".format(i_dea + 1))
         self.repaint()
 
     def new_image_callback(self, image, timestamp, cam_id):
