@@ -10,6 +10,14 @@ class SwitchBoard(HVPS):
         super().__init__()
         self.logging = logging.getLogger("Switchboard")  # change logger to "Switchboard"
 
+    def __del__(self):
+        try:
+            self.set_relays_off()
+        except Exception as ex:
+            self.logging.warning("Unable to switch off the relays: {}".format(ex))
+
+        super().__del__()
+
     def set_relay_auto_mode(self, reconnect_timeout=0):
         """
         Enable the automatic short circuit detection and isolation function of the switchboard

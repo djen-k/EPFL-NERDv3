@@ -61,49 +61,46 @@ class MainWindow(QWidget):
         self.logging = logging.getLogger("mainWindow")
 
 
-def _setup(_comport, _camorder, _voltage):
+def _setup():
     config_file_name = "config.txt"
 
     try:
-        _comport, _camorder, _voltage = read_config(config_file_name)
+        config = read_config(config_file_name)
         logging.info("Read config file")
     except Exception as ex:
         logging.warning("Unable to read config file: {}".format(ex))
+        config = {}
 
     # Show setup dialog to get COM port and camera order
-    setup_dialog = SetupDialog.SetupDialog(com_port_default=_comport, cam_order_default=_camorder,
-                                           voltage_default=_voltage)
+    setup_dialog = SetupDialog.SetupDialog(config)
 
     if setup_dialog.exec_():
-        _comport, _camorder, _voltage = setup_dialog.get_results()
-        logging.info("User selection for HVPS COM port: {}".format(_comport))
-        logging.info("Test voltage set to {} V".format(_voltage))
-        logging.info("User selection for cam order: {}".format(_camorder))
+        config, strain_detector = setup_dialog.get_results()
+        logging.info("{}".format(config))
 
         try:
-            write_config(config_file_name, _comport, _camorder, _voltage)
+            write_config(config_file_name, config)
             logging.info("Wrote config file")
         except Exception as ex:
             logging.warning("Unable to write config file: {}".format(ex))
     else:
-        logging.critical("No COM port or cam order selected")
-        raise Exception("No COM port or cam order selected")
+        logging.critical("Aborted by user")
+        raise Exception("Aborted by user")
 
-    return _comport, _camorder, _voltage
+    return config, strain_detector
 
 
 class NERD:
 
-    def __init__(self, _comport, _camorder, _voltage):
+    def __init__(self, config, strain_detector=None):
         self.logging = logging.getLogger("NERD")
-        self.comport = _comport
-        self.camorder = _camorder
-        self.voltage = _voltage
+        self.config = config
         self.image_cap = ImageCapture.SharedInstance
         # TODO: implement robust system for getting number of DEAs and dealing with unexpected number of images etc.
         self.n_dea = self.image_cap.get_camera_count()  # this works if we previously selected the cameras
+        self.strain_detector = strain_detector
 
-        self.hvpsInst = NERDHVPS.init_hvps(self.comport)
+        self.hvpsInst = NERDHVPS.init_hvps(self.config["com_port"])
         self.hvpsInst.set_relay_auto_mode()  # enable auto mode by default
         self.hvpsInst.set_switching_mode(1)  # set to DC mode by default to make sure that the HV indicator LED works
         self.shutdown_flag = False
@@ -127,20 +124,21 @@ class NERD:
         save_file_name = "{}/{} data.csv".format(dir_name, session_name)
         saver = DataSaver(self.n_dea, save_file_name)
 
-        strain_detector = StrainDetection.StrainDetector()
+        if self.strain_detector is None:
+            self.strain_detector = StrainDetection.StrainDetector()
 
         # get settings/values from user
-        max_voltage = self.voltage
+        max_voltage = self.config["voltage"]
         min_voltage = 300
         # TODO: check why min voltage is 300 V (officially 50, but doesn't always seem to work)
-        nsteps = 5
+        nsteps = self.config["steps"]
         voltage_step = max_voltage / nsteps
 
-        duration_low_s = 30
-        duration_high_s = 1 * 60 * 60  # 1 h = 3600 s
-        step_duration_s = 5
-        measurement_period_s = 5
-        image_capture_period_s = 60 * 30  # every 30 min
+        duration_low_s = self.config["low_duration_s"]
+        duration_high_s = self.config["high_duration_min"] * 60  # convert to seconds
+        step_duration_s = self.config["step_duration_s"]
+        measurement_period_s = self.config["measurement_period_s"]
+        image_capture_period_s = self.config["save_image_period_min"] * 60  # convert to seconds
 
         # prepare / compute what we need before applying voltage
         current_target_voltage = 0
@@ -268,10 +266,13 @@ class NERD:
                 # timestamp = cap.get_timestamps(cap.get_camera_count() - 1)
 
                 # fit ellipses
-                strain, center_shifts, res_imgs, outliers = strain_detector.get_dea_strain(imgs, True, True)
-                if any(outliers):
+                vs = "{} V".format(measuredVoltage)
+                strain, center_shifts, res_imgs, vis_state = self.strain_detector.get_dea_strain(imgs, True, True, vs)
+                if 0 in vis_state:  # 0 means outlier, 1 means OK
                     self.logging.warning("Outlier detected")
-                # TODO: handle outliers (don't save data or mark in output file)
+
+                for img, v, e in zip(res_imgs, vis_state, deaState):
+                    StrainDetection.draw_state_visualization(img, v, e)
 
                 # print average strain for each DEA
                 self.logging.info("strain: {}".format(np.reshape(np.mean(strain, 1), (1, -1))))
@@ -281,6 +282,7 @@ class NERD:
                 # ------------------------------
                 # todo: write elapsed time in seconds to output file
                 # todo compute total time at max voltage
+                # TODO: save visual state
                 saver.write_data(now, current_target_voltage, measuredVoltage, deaState,
                                  current_state, strain, center_shifts, image_saved=image_due)
 
@@ -303,13 +305,18 @@ class NERD:
                 # -----------------------
                 # show images
                 # -----------------------
+                shape = (720, 405)
+                disp_imgs = [cv.resize(ImageCapture.ImageCapture.IMG_NOT_AVAILABLE, shape)] * 6
+                for i in range(6):
+                    if len(res_imgs) > i and res_imgs[i] is not None:
+                        disp_imgs[i] = cv.resize(res_imgs[i], shape)
 
-                for i in range(len(res_imgs)):
-                    if res_imgs[i] is None:
-                        cv.imshow('DEA {}'.format(i), cv.resize(ImageCapture.ImageCapture.IMG_NOT_AVAILABLE, (0, 0),
-                                                                fx=0.35, fy=0.35))
-                    else:
-                        cv.imshow('DEA {}'.format(i), cv.resize(res_imgs[i], (0, 0), fx=0.35, fy=0.35))
+                sep = np.zeros((shape[1], 3, 3), dtype=np.uint8)
+                row1 = np.concatenate((disp_imgs[0], sep, disp_imgs[1], sep, disp_imgs[2]), axis=1)
+                row2 = np.concatenate((disp_imgs[3], sep, disp_imgs[4], sep, disp_imgs[5]), axis=1)
+                sep = np.zeros((3, row1.shape[1], 3), dtype=np.uint8)
+                disp_img = np.concatenate((row1, sep, row2), axis=0)
+                cv.imshow("NERD running... (press [q] to exit)", disp_img)
 
             # ------------------------------
             # Apply state change and update voltage
@@ -342,6 +349,7 @@ class NERD:
         self.logging.critical("Exiting...")
         self.hvpsInst.set_output_off()
         self.hvpsInst.set_voltage(0, wait=True)
+        self.hvpsInst.set_relays_off()
         del self.hvpsInst
         self.logging.critical("Turned voltage off and disconnected relays")
         saver.close()
@@ -355,17 +363,12 @@ if __name__ == '__main__':
     # launch Qt
     app = QApplication(sys.argv)
 
-    # hard coded default config
-    com_port = "COM3"
-    cam_order = [0, 1, 2, 3, 4, 5]
-    voltage = 1000
-
     # run setup
-    com_port, cam_order, voltage = _setup(com_port, cam_order, voltage)
+    _config, _strain_detector = _setup()
     # apply cam order to image capture so we can just address them as cam 0, 1, 2, ...
-    ImageCapture.SharedInstance.select_cameras(cam_order)
+    ImageCapture.SharedInstance.select_cameras(_config["cam_order"])
 
-    nerd = NERD(com_port, cam_order, voltage)
+    nerd = NERD(_config, _strain_detector)
     nerd.run_nogui()
 
     # ex = App(args=None)

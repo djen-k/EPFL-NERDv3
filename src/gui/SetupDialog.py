@@ -1,13 +1,14 @@
 import logging
 import math
+import time
 
 import cv2
-from PyQt5 import QtWidgets, QtSerialPort
-from PyQt5.QtCore import Qt
+from PyQt5 import QtWidgets, QtSerialPort, QtGui
+from PyQt5.QtCore import Qt, QThread
 
 from src.gui import QtImageTools
-from src.image_processing import ImageCapture
-from src.image_processing import StrainDetection
+from src.hvps import NERDHVPS
+from src.image_processing import ImageCapture, StrainDetection
 
 
 class SetupDialog(QtWidgets.QDialog):
@@ -15,67 +16,122 @@ class SetupDialog(QtWidgets.QDialog):
     This class is a dialog window asking the user to select a COM port and assign a camera to each DEA
     """
 
-    def __init__(self, parent=None, com_port_default=None, cam_order_default=None, voltage_default=None):
+    def __init__(self, defaults=None, parent=None):
         super(SetupDialog, self).__init__(parent)
         # Create logger
         self.logging = logging.getLogger("SetupDialog")
         self._startup = True  # flag to indicate that the dialog is still loading
 
+        if defaults is not None:
+            self._defaults = defaults
+        else:
+            self._defaults = {}
+
         n_deas = 6  # not accepting anything else at the moment
         self._n_deas = n_deas
-        n_rows = 2
         n_cols = 3
 
-        self._default_img_size = [800, 450]  # [640, 360]
+        self._default_img_size = [720, 405]  # [800, 450]  [640, 360]
 
         # register callback
         # image_capture.set_new_image_callback(self.updateImage)
         # image_capture.set_new_set_callback(self.updateImages)
         self._image_capture = ImageCapture.SharedInstance
+        self._strain_detector = None  # will be set when a reference is recorded
         self.n_cams = 0  # we don't know of any available cameras yet
+
+        self._hvps = None
 
         # return values
         self._camorder = [-1] * n_deas
         self._image_buffer = [QtImageTools.conv_Qt(ImageCapture.ImageCapture.IMG_WAITING,
                                                    self._default_img_size)] * n_deas
 
-        if cam_order_default is None:
-            cam_order_default = range(n_deas)
-        elif len(cam_order_default) != n_deas:
-            raise ValueError("Default camera order must define a camera for each of {} DEAs. "
-                             "(Set -1 if not used)".format(n_deas))
-        self._cam_order_default = cam_order_default
+        if "cam_order" in self._defaults:
+            co = self._defaults["cam_order"]
+            assert len(co) == n_deas, "Must define a camera for each DEA! (use -1 if not used)"
+            self._cam_order_default = co
+        else:
+            self._cam_order_default = range(n_deas)
 
         # Set window's title
         self.setWindowTitle("Camera selection dialog")
 
-        # create the main layout: vertical box with description at the top, then grid of images, then Next button
-        mainLay = QtWidgets.QVBoxLayout(self)
+        ##############################################################################
+        #  Layout
+        ##############################################################################
 
-        # list all available com ports
-        comports = QtSerialPort.QSerialPortInfo.availablePorts()
+        # panel for all the settings
+        formLay = QtWidgets.QFormLayout()
+        formLay.setLabelAlignment(Qt.AlignRight)
+
         # add combo box to select the COM port
         self.cbb_port_name = QtWidgets.QComboBox()
-        for info in comports:
-            self.cbb_port_name.addItem(info.portName())
+        self.cbb_port_name.currentTextChanged.connect(self.cbb_comport_changed)
 
-        # select the default COM port, if it is available
-        if com_port_default is not None:
-            for i in range(len(comports)):
-                if comports[i].portName() == com_port_default:
-                    self.cbb_port_name.setCurrentIndex(i)
-                    break
-        else:  # no default --> pick first one
-            self.cbb_port_name.setCurrentIndex(0)
+        # button to refresh com ports
+        self.btn_refresh_com = QtWidgets.QPushButton("Refresh")
+        self.btn_refresh_com.clicked.connect(self.refresh_comports)
+
+        # label to show what switchboard we're connected to
+        self.lbl_switcbox_status = QtWidgets.QLabel("nothing")
+
+        formLay.addRow("Switchboard:", self.cbb_port_name)
+        formLay.addRow("Connected to:", self.lbl_switcbox_status)
+        formLay.addRow("", self.btn_refresh_com)
 
         # create voltage selector
-        self.num_voltage = QtWidgets.QSpinBox()
-        self.num_voltage.setMinimum(100)
-        self.num_voltage.setMaximum(5000)
-        voltage = 1000
-        if voltage_default is not None:
-            voltage = voltage_default
-        self.num_voltage.setValue(voltage)
+        self.num_voltage = self.create_num_selector(300, 5000, "voltage", 1000)
+        formLay.addRow("Voltage [V]:", self.num_voltage)
+
+        # toggle button to apply voltage (to check strain detection results)
+        self.btn_apply_voltage = QtWidgets.QPushButton("Apply voltage now!")
+        self.btn_apply_voltage.setCheckable(True)
+        self.btn_apply_voltage.setEnabled(False)  # only enable if connected to an HVPS
+        self.btn_apply_voltage.clicked.connect(self.btnVoltageClicked)
+        formLay.addRow("", self.btn_apply_voltage)
+
+        # create ramp step selector
+        self.num_steps = self.create_num_selector(0, 100, "steps", 10)
+        formLay.addRow("Ramp steps:", self.num_steps)
+
+        # create step duration selector
+        self.num_step_duration = self.create_num_selector(0, 10000, "step_duration_s", 10)
+        formLay.addRow("Step duration (s):", self.num_step_duration)
+
+        # create high duration selector
+        self.num_high_duration = self.create_num_selector(0, 100000, "high_duration_min", 60)
+        formLay.addRow("High duration (min):", self.num_high_duration)
+
+        # create low duration selector
+        self.num_low_duration = self.create_num_selector(0, 100000, "low_duration_s", 30)
+        formLay.addRow("Low duration (s):", self.num_low_duration)
+
+        # create measurement period selector
+        self.num_measurement_period = self.create_num_selector(0, 1000, "measurement_period_s", 10)
+        formLay.addRow("Measure every _ s:", self.num_measurement_period)
+
+        # create image save period selector
+        self.num_save_image_period = self.create_num_selector(0, 1000, "image_save_period_min", 30)
+        formLay.addRow("Save images every _ min:", self.num_save_image_period)
+
+        # checkbox to enable AC mode
+        self.chk_ac = QtWidgets.QCheckBox("AC mode")
+        self.chk_ac.clicked.connect(self.chkACClicked)
+        formLay.addRow("", self.chk_ac)
+
+        # create image save period selector
+        self.num_ac_frequency = self.create_num_selector(0, 1000, "ac_frequency", 50)
+        formLay.addRow("Switching frequency [Hz]:", self.num_ac_frequency)
+
+        # apply default to AC checkbox and enable or disable frequency selector accordingly
+        if "AC_mode" in self._defaults:
+            checked = self._defaults["AC_mode"]
+        else:
+            checked = False
+        self.chk_ac.setChecked(checked)
+        self.chk_ac.setEnabled(False)  # TODO: re-enable once AC mode is implemented
+        self.num_ac_frequency.setEnabled(checked)
 
         # create grid layout to show all the images
         gridLay = QtWidgets.QGridLayout()
@@ -118,49 +174,71 @@ class SetupDialog(QtWidgets.QDialog):
             gridLay.addWidget(groupBox, row, col)
 
         # OK button to close the dialog and return results
-        self.btnNext = QtWidgets.QPushButton("OK")
-        self.btnNext.clicked.connect(self.accept)
+        self.btnStart = QtWidgets.QPushButton("Start!")
+        self.btnStart.clicked.connect(self.btnStartClicked)
 
         # button to take new images
         self.btnCapture = QtWidgets.QPushButton("Take new image")
         self.btnCapture.clicked.connect(self.btnCaptureClicked)
 
-        # toggle button to show the strain detection results
-        self.btnPreview = QtWidgets.QPushButton("Show strain detection")
-        self.btnPreview.setCheckable(True)
-        self.btnPreview.clicked.connect(self.btnPreviewClicked)
+        # button to take new images
+        self.chkStrain = QtWidgets.QCheckBox("Show strain")
+        self.chkStrain.setEnabled(False)  # only enable once a strain reference has been set
+        self.chkStrain.clicked.connect(self.btnCaptureClicked)
+
+        # button to record strain reference
+        self.btnReference = QtWidgets.QPushButton("Record strain reference")
+        self.btnReference.clicked.connect(self.record_strain_reference)
 
         buttonLay = QtWidgets.QHBoxLayout()
-        buttonLay.addWidget(self.btnCapture, alignment=Qt.AlignLeft)
-        buttonLay.addWidget(self.btnPreview, alignment=Qt.AlignLeft)
-        buttonLay.addWidget(self.btnNext, alignment=Qt.AlignRight)
+        buttonLay.setAlignment(Qt.AlignLeft)
+        buttonLay.addWidget(self.btnCapture)
+        buttonLay.addWidget(self.chkStrain)
+        buttonLay.addWidget(self.btnReference)
+        buttonLay.addSpacerItem(QtWidgets.QSpacerItem(20, 1))
+        buttonLay.addWidget(self.btnStart)
 
         # some GUI (layout stuff)
         # formLay = QtWidgets.QFormLayout(self)
 
-        mainLay.addWidget(QtWidgets.QLabel("Please select COM port for HVPS/Switchboard"))
-        mainLay.addWidget(self.cbb_port_name, alignment=Qt.AlignLeft)
+        # create the main layout: vertical box with description at the top, then grid of images, then Next button
+        mainLay = QtWidgets.QVBoxLayout(self)
 
-        # add a separator between COM selection and camera images
+        topLay = QtWidgets.QHBoxLayout()
+        topLay.setAlignment(Qt.AlignLeft)
+        # topLay.setContentsMargins(50, 5, 50, 5)
+        topLay.addLayout(formLay)
+        schematic = QtWidgets.QLabel()
+        pix_schematic = QtGui.QPixmap("res/images/schematic_voltage.png").scaledToHeight(250, Qt.SmoothTransformation)
+        schematic.setPixmap(pix_schematic)
+        schematic.setAlignment(Qt.AlignTop)
+        schematic.setContentsMargins(20, 5, 20, 5)
+        topLay.addWidget(schematic)
+
+        spacer = QtWidgets.QSpacerItem(1, 1, QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Minimum)
+        topLay.addSpacerItem(spacer)
+
+        logo = QtWidgets.QLabel()
+        logo.setPixmap(QtGui.QPixmap("res/images/epfl_logo.png"))
+        logo.setAlignment(Qt.AlignTop)
+        topLay.addWidget(logo)
+
+        mainLay.addLayout(topLay)
+
+        # add a separator between settings and camera images
         separator = QtWidgets.QFrame()
         separator.setFrameShape(QtWidgets.QFrame.HLine)
         separator.setFrameShadow(QtWidgets.QFrame.Sunken)
         mainLay.addWidget(separator)
 
-        mainLay.addWidget(QtWidgets.QLabel("Please specify the desired test voltage"))
-        mainLay.addWidget(self.num_voltage, alignment=Qt.AlignLeft)
-
-        # add a separator between COM selection and camera images
-        separator = QtWidgets.QFrame()
-        separator.setFrameShape(QtWidgets.QFrame.HLine)
-        separator.setFrameShadow(QtWidgets.QFrame.Sunken)
-        mainLay.addWidget(separator)
-
-        mainLay.addWidget(QtWidgets.QLabel("Select the camera to use for each DEA. Make sure the images are sharp "
-                                           "and that the DEAs are centered in the images"))
-        mainLay.addLayout(gridLay)
         mainLay.addLayout(buttonLay)
-        # mainLay.addLayout(formLay)
+        mainLay.addLayout(gridLay)
+
+        ##############################################################################
+        #  layout done
+        ##############################################################################
+
+        self.refresh_comports()  # fill with available ports
 
         # self.setWindowFlags(Qt.Window)
         self.show()
@@ -173,6 +251,72 @@ class SetupDialog(QtWidgets.QDialog):
         ImageCapture.SharedInstance.set_new_image_callback(None)  # de-register so it doesn't get refreshed twice
         self.logging.debug("Unregistered callback")
 
+        self._startup = False
+
+    def create_num_selector(self, min_val, max_val, default_key, default_value):
+        """
+        Creates a QSpinBox for setting numeric values.
+        :param min_val: Minimum value
+        :param max_val: Maximum value
+        :param default_key: Key to look up default value in the defaults dict
+        :param default_value: Value to use if the key is not in the defaults dict
+        :return: A QSpinBox with the given range and value
+        """
+        num = QtWidgets.QSpinBox()
+        num.setMinimum(min_val)
+        num.setMaximum(max_val)
+        if default_key in self._defaults:
+            value = self._defaults[default_key]
+        else:
+            value = default_value
+        num.setValue(value)
+
+        return num
+
+    def btnStartClicked(self):
+        # only proceed if a strain reference has been set
+        if self._strain_detector is None:
+            QtWidgets.QMessageBox.warning(self, "No strain reference",
+                                          "To start a measurement, please set a strain reference!",
+                                          QtWidgets.QMessageBox.Ok)
+        else:
+            self.accept()
+
+    def chkACClicked(self):
+        self.num_ac_frequency.setEnabled(self.chk_ac.isChecked())
+
+    def refresh_comports(self):
+        self.cbb_port_name.clear()  # remove all items
+        # list all available com ports
+        comports = QtSerialPort.QSerialPortInfo().availablePorts()
+        portnames = [info.portName() for info in comports]
+        # comports = serial.tools.list_ports.comports()
+        # portnames = comports[0].name
+        self.cbb_port_name.addItems(portnames)
+
+        # select the default COM port, if it is available
+        if "com_port" in self._defaults and self._defaults["com_port"] in portnames:
+            self.cbb_port_name.setCurrentText(self._defaults["com_port"])
+        else:  # no default or default not available --> pick last one
+            self.cbb_port_name.setCurrentIndex(len(comports) - 1)
+
+    def cbb_comport_changed(self):
+        if self._hvps is not None:
+            del self._hvps
+
+        try:
+            port = self.cbb_port_name.currentText()
+            hvps = NERDHVPS.init_hvps(port)
+            self.lbl_switcbox_status.setText(hvps.get_name().decode("ASCII"))
+            self._hvps = hvps
+            self.btn_apply_voltage.setEnabled(True)
+        except Exception as ex:
+            self.logging.debug("Could not connect to switchboard: {}".format(ex))
+            self.lbl_switcbox_status.setText("nothing")
+            self.btn_apply_voltage.setEnabled(False)
+            self.btn_apply_voltage.setChecked(False)
+            self._hvps = None
+
     def btnAdjustClicked(self):
         self.logging.debug("clicked adjust")
         sender = self.sender()
@@ -182,8 +326,41 @@ class SetupDialog(QtWidgets.QDialog):
                 self.showAdjustmentView(i_dea)
                 self.btnCaptureClicked()
 
-    def btnPreviewClicked(self):
+    def record_strain_reference(self):
+        # TODO: protect against impatient clicks
+        cap = self._image_capture
+        image_sets = cap.read_average(10)
+        order = self.getCamOrder()
+        order_filt = [i for i in order if i >= 0]  # filter to remove unused cameras (-1)
+        image_sets = [image_sets[i] for i in order_filt]  # put image sets in the right order
+
+        self._strain_detector = StrainDetection.StrainDetector()
+        self._strain_detector.set_reference(image_sets)
+
+        self.chkStrain.setEnabled(True)
+        self.chkStrain.setChecked(True)
+
+        cap.read_images()  # read one new set because refreshImages just grabs the images from the buffer
         self.refreshImages()
+        QThread.currentThread().eventDispatcher().flush()
+
+    def btnVoltageClicked(self):
+
+        if self._hvps is not None:
+            if self.btn_apply_voltage.isChecked():
+                # turn on and set voltage
+                self._hvps.set_relay_auto_mode()
+                self._hvps.set_voltage(self.num_voltage.value(), wait=True)
+            else:
+                self._hvps.set_voltage(0)
+                self._hvps.set_relays_off()
+
+            time.sleep(0.5)
+            # capture new images to show strain
+            self.btnCaptureClicked()
+        else:
+            self.btn_apply_voltage.setChecked(False)
+            self.btn_apply_voltage.setEnabled(False)
 
     def showAdjustmentView(self, i_dea):
         i_cam = self._camorder[i_dea]
@@ -203,61 +380,59 @@ class SetupDialog(QtWidgets.QDialog):
         cv2.destroyAllWindows()
 
     def camSelIndexChanged(self):
-        try:
-            # find which combo box it came from
-            # src = -1
-            # camorder = self.getCamOrder()
-            # for i in range(len(camorder)):
-            #     if camorder[i] != self._camorder[i]:
-            #         src = i
-            #         break
-            #
-            # if src == -1:
-            #     self.logging.debug("Could not identify source of combobox index changed event")
-            #
-            # self._camorder = camorder  # update stored cam order
-            #
-            # if src == -1:
-            #     return
-            sender = self.sender()
-            # self.logging.debug("Combobox callback: {}".format(sender))
-            # src = -1
-            # try:
-            #     src = self.cbb_camera_select.index(sender)
-            # except ValueError:
-            #     self.logging.debug("Combobox caller not known")
+        if self._startup:
+            return
 
+        try:
             # see if any other combobox has the same selected index
-            assert type(sender) == QtWidgets.QComboBox
-            idx = sender.currentIndex()
+            sender = self.sender()
+            i_sender = self.cbb_camera_select.index(sender)
+            sender = self.cbb_camera_select[i_sender]
+            idx_cam = sender.currentIndex()
+            prev_idx = self._camorder[i_sender] + 1
+
             # self.logging.debug("camera selection index for DEA {} changed to {}".format(src, idx))
-            if idx > 0:  # if it's 0 ("not used"), we don't need to do anything
-                for i in range(self._n_deas):
-                    cb = self.cbb_camera_select[i]
-                    if cb is not sender and cb.currentIndex() == idx:
-                        cb.setCurrentIndex(0)  # set to "not used"
+            if idx_cam > 0:  # if it's 0 ("not used"), we don't need to do anything
+                for cb in self.cbb_camera_select:
+                    if cb is not sender and cb.currentIndex() == idx_cam:
+                        cb.setCurrentIndex(prev_idx)  # set to the previous selection of the sender
             self._camorder = self.getCamOrder()  # update stored cam order
+
+            # disable strain display because if the camera selection changes, the strain reference is no longer valid
+            if self._strain_detector is not None:
+                self.chkStrain.setEnabled(False)
+                self.chkStrain.setChecked(False)
+                self._strain_detector = None
+                QtWidgets.QMessageBox.information(self, "Strain reference no longer valid", "Since the camera order "
+                                                                                            "changed, the strain reference is no longer valid! Please set a new"
+                                                                                            "strain reference",
+                                                  QtWidgets.QMessageBox.Ok)
+
             self.refreshImages()
         except Exception as ex:
             self.logging.error("Exception in combobox callback: {}".format(ex))
 
     def refreshImages(self):
         images = self._image_capture.get_images_from_buffer()
+        order = self.getCamOrder()
+        order_filt = [i for i in order if i >= 0]  # filter to remove unused cameras (-1)
+        images = [images[i] for i in order_filt]  # put images in the right order
+
+        if self.chkStrain.isChecked():
+            try:
+                v = self._hvps.get_current_voltage()
+                sv = "{} V".format(v)
+            except Exception as ex:
+                self.logging.debug("Couldn't read vooltage: {}".format(ex))
+                sv = ""
+            images = self._strain_detector.get_dea_strain(images, True, True, sv)[2]
+
+        i_img = 0
         for i_dea in range(self._n_deas):
-            i_cam = self._camorder[i_dea]
+            i_cam = order[i_dea]
             if i_cam >= 0:
-                if self.btnPreview.isChecked():
-                    img = images[i_cam]
-                    try:
-                        ellipse, mask = StrainDetection.dea_fit_ellipse(img)
-                        img = StrainDetection.visualize_result(img, ellipse)
-                        self.logging.debug("Electrode area for DEA {}: {}".format(i_dea + 1, ellipse))
-                    except Exception as ex:
-                        self.logging.warning("Failed to detect electrode area for DEA {}! ({})".format(i_dea + 1, ex))
-                        pass
-                    self.setImage(i_dea, img)
-                else:
-                    self.setImage(i_dea, images[i_cam])
+                self.setImage(i_dea, images[i_img])
+                i_img += 1
             else:
                 self.setImage(i_dea, ImageCapture.ImageCapture.IMG_NOT_AVAILABLE)
 
@@ -273,14 +448,15 @@ class SetupDialog(QtWidgets.QDialog):
         self.repaint()
 
     def new_image_callback(self, image, timestamp, cam_id):
-        self.setImage(int(cam_id[-1]), image)
+        self.setImage(int(cam_id[-1]) - 1, image)  # convert last character of name to 0-based index
 
     def btnCaptureClicked(self):
+        # TODO: protect against impatient clicks
         self.updateImages(self._image_capture.read_images(), self._image_capture.get_timestamps())
 
     def btnNextClicked(self):
         print("next")
-        self.btnNext.clicked.connect(self.accept)
+        self.btnStart.clicked.connect(self.accept)
         # self._image_capture.read_images()
         # # Get index of selected DEA, add it to the camOrderList and disable it form ComboBox
         # if self.camSelW.currentText() != "Not used":
@@ -330,8 +506,25 @@ class SetupDialog(QtWidgets.QDialog):
         return [cb.currentIndex() - 1 for cb in self.cbb_camera_select]
 
     def get_results(self):
-        # return values of fields when OK
-        return self.cbb_port_name.currentText(), self.getCamOrder(), self.num_voltage.value()
+        """
+        Get sonfiguration for the NERD test as set in the SetupDialog
+        :return: A config dict with all the parameters, as well as a strain detector with pre-set strain reference
+        """
+        config = {
+            "com_port": self.cbb_port_name.currentText(),
+            "cam_order": self.getCamOrder(),
+            "voltage": self.num_voltage.value(),
+            "steps": self.num_steps.value(),
+            "step_duration_s": self.num_step_duration.value(),
+            "high_duration_min": self.num_high_duration.value(),
+            "low_duration_s": self.num_low_duration.value(),
+            "measurement_period_s": self.num_measurement_period.value(),
+            "save_image_period_min": self.num_save_image_period.value(),
+            "ac_mode": self.chk_ac.isChecked(),
+            "ac_frequency": self.num_ac_frequency.value(),
+        }
+
+        return config, self._strain_detector
 
     def updateImage(self, image, timestamp, cam_id):
 
@@ -382,12 +575,3 @@ class SetupDialog(QtWidgets.QDialog):
                     self.cbb_camera_select[i].setCurrentIndex(cam_id + 1)  # plus 1 because first is 'not used'
 
         self.refreshImages()
-        # show the new image in each frame where the respective camera is selected (should only ever be one)
-        # for i_dea in range(self._n_deas):
-        #     i_cam = self._camorder[i_dea]
-        #
-        #     # if camera index for any dea is -1 ("not used"), show the not available image
-        #     if i_cam == -1:
-        #         self.lbl_image[i_dea].setPixmap(QtImageTools.conv_Qt(ImageCapture.IMG_NOT_AVAILABLE, self._default_img_size))
-        #     else:
-        #         self.lbl_image[i_dea].setPixmap(QtImageTools.conv_Qt(images[i_cam], self._default_img_size))

@@ -13,10 +13,12 @@ class StrainDetector:
         self.logging = logging.getLogger("StrainDetector")
 
         self._reference_images = None
+        self._reference_result_images = None  # store so they can be saved later
         self._reference_ellipses = None
         self._exclude_masks = None  # masks defining areas to exclude (for faster electrode outline detection)
         self._reference_radii = None
         self._reference_centers = None
+        self.setting_reference = False
 
         self.query_angles = np.array([0, 90])
         self._strain_threshold = 1.3  # above 50 % strain can be considered an outlier
@@ -29,6 +31,9 @@ class StrainDetector:
         self._exclude_masks = None
         self._reference_radii = None
         self._reference_centers = None
+        self.setting_reference = True
+        res = self.get_dea_strain(reference_images, True)
+        self._reference_result_images = res[2]
 
     def get_deviation_from_reference(self, images):
         if self._reference_images is None:
@@ -37,7 +42,7 @@ class StrainDetector:
         else:
             return [get_image_deviation(img, ref) for img, ref in zip(images, self._reference_images)]
 
-    def get_dea_strain(self, imgs, output_result_image=False, check_outliers=False):
+    def get_dea_strain(self, imgs, output_result_image=False, check_visual_state=False, title=""):
 
         n_img = len(imgs)
 
@@ -50,7 +55,7 @@ class StrainDetector:
         outlier = np.array([False] * len(imgs))
 
         # check if image deviation is too large
-        if check_outliers:
+        if check_visual_state:
             if self._reference_images is not None:
                 img_dev = self.get_deviation_from_reference(imgs)
                 self.logging.debug("Image deviations: {}".format(img_dev))
@@ -82,11 +87,15 @@ class StrainDetector:
             if np.any(ellipses_np == np.nan) or any(outlier):
                 self.logging.critical("Invalid reference! Cannot proceed without a valid reference!")
             # if not explicitly calling set_reference, print a warning that a new reference is being set
-            self.logging.info("No strain reference has been set yet. The given images will be set as reference.")
+            if self.setting_reference:
+                self.logging.info("Setting new strain reference.")
+            else:
+                self.logging.warning("No strain reference has been set yet. The given images will be set as reference.")
             self._reference_images = imgs
             self._reference_ellipses = ellipses
             self._reference_radii = xy_radii
             self._reference_centers = centers
+            title = "Reference"  # to be displayed on the result image
 
         # calculate strain and shift
         strain = xy_radii / self._reference_radii
@@ -95,7 +104,7 @@ class StrainDetector:
         center_shift = centers - self._reference_centers
 
         # check if strain is too large
-        if check_outliers:
+        if check_visual_state:
             strain_out = np.bitwise_or(strain > self._strain_threshold, strain < self._neg_strain_threshold)
             strain_out = np.any(strain_out, axis=1)
             outlier = np.bitwise_or(outlier, strain_out)
@@ -103,19 +112,26 @@ class StrainDetector:
             shift_out = np.any(shift_out, axis=1)
             outlier = np.bitwise_or(outlier, shift_out)
 
+            visual_state = list(np.invert(outlier).astype(np.uint8))
+        else:
+            visual_state = [None] * n_img
+
         # update exclude masks
         for i in range(n_img):
-            if check_outliers and outlier[i]:
+            if check_visual_state and outlier[i]:
                 masks[i] = None  # keeps it from saving this mask if it belongs to an outlier
             if masks[i] is not None:
                 self._exclude_masks[i] = masks[i]
 
         res_imgs = None
         if output_result_image:
-            res_imgs = [visualize_result(imgs[i], ellipses[i], tuple(xy_radii[i, :]), tuple(self.query_angles),
-                                         self._reference_ellipses[i], strain_all[i, :]) for i in range(len(imgs))]
+            # create a list of flags indicating the DEA state (as determined visually) or non to disable the indicator
 
-        return strain, center_shift, res_imgs, outlier
+            res_imgs = [visualize_result(imgs[i], ellipses[i], tuple(xy_radii[i, :]), tuple(self.query_angles),
+                                         self._reference_ellipses[i], strain_all[i, :], title=title)
+                        for i in range(len(imgs))]
+
+        return strain, center_shift, res_imgs, visual_state
 
 
 def draw_ellipse(img, ellipse, color, line_width, draw_axes=False, axis_line_width=1):
@@ -320,7 +336,10 @@ def find_electrode_outline(img_bw, exclude_mask=None, iterations=20, center=None
         if i >= iterations:
             break
 
-        converged = (old_area - new_area) / old_area < 0.0001
+        if old_area == 0:
+            converged = False
+        else:
+            converged = (old_area - new_area) / old_area < 0.0001
 
     if i < iterations:
         logger.debug("Electrode outline detection converged after {} iterations".format(i))
@@ -529,10 +548,13 @@ def ellipse_radius_at_angle(ellipses_np, query_angles):
     return prod / sqr_sum
 
 
-def visualize_result(img, ellipse, radii=None, angles=None, reference_ellipse=None, strain=None, marker_size=8):
+def visualize_result(img, ellipse, radii=None, angles=None, reference_ellipse=None, strain=None, marker_size=8,
+                     title=""):
     """
     Visualizes the strain detection result by drawing the detected ellipse on the image. Can also show specific radial
     strain values at certain angles.
+    :param visual_state: Flag to indicate if the state is good (True -> green) or bad (False -> red)
+    :param title: text to be displayed on the image
     :param strain: The detected strain values
     :param img: The image to draw the visualization on
     :param ellipse: The detected ellipse to draw on the image. In OpenCV ellipse format: ((cx, cy), (r1, r2), angle)
@@ -548,38 +570,82 @@ def visualize_result(img, ellipse, radii=None, angles=None, reference_ellipse=No
 
     img = np.copy(img)  # copy so we don't alter the original
 
-    fit_color = (255, 0, 0)
-    ref_color = (0, 255, 0)
-    strain_color = ((0, 127, 255), (127, 0, 255))
+    blue = (255, 0, 0)
+    green = (0, 200, 0)
+    red = (0, 0, 255)
+    black = (0, 0, 0)
+    strain_colors = ((0, 127, 255), (127, 0, 255))
 
     # draw the reference ellipse
     if reference_ellipse is not None:
-        draw_ellipse(img, reference_ellipse, ref_color, 1, True, 1)
+        draw_ellipse(img, reference_ellipse, green, 1, True, 1)
 
     # draw the fitted ellipse
-    draw_ellipse(img, ellipse, fit_color, 2, True, 1)
+    draw_ellipse(img, ellipse, blue, 2, True, 1)
 
     # draw radial strain
     if radii is not None and angles is not None:
         center, diam, angle = ellipse
-        for r, a, c in zip(radii, angles, strain_color):
+        for r, a, c in zip(radii, angles, strain_colors):
             p1, p2 = draw_diameter(img, center, r, a, c, 1)
             draw_cross(img, p1, marker_size, a, c, 2)
             draw_cross(img, p2, marker_size, a, c, 2)
 
     # draw text
     font = cv.FONT_HERSHEY_SIMPLEX
+    scale = 1.5
+    margin = 20
+    cv.putText(img, title, (margin, 60), font, scale, black, 3)
     if reference_ellipse is not None:
-        cv.putText(img, "Detected ellipse", (10, 40), font, 1, fit_color, 2)
-        cv.putText(img, "Reference ellipse", (10, 80), font, 1, ref_color, 2)
+        cv.putText(img, "Detected ellipse", (margin, 120), font, scale, blue, 2)
+        cv.putText(img, "Reference ellipse", (margin, 180), font, scale, green, 2)
 
     if strain is not None:
         x_strain, y_strain, a_strain = strain * 100 - 100  # convert to engineering strain and split
-        cv.putText(img, "r1 strain: {:.2f} %".format(x_strain), (10, 120), font, 1, strain_color[0], 2)
-        cv.putText(img, "r2 strain: {:.2f} %".format(y_strain), (10, 160), font, 1, strain_color[1], 2)
-        cv.putText(img, "Area strain: {:.2f} %".format(a_strain), (10, 200), font, 1, (0, 0, 0), 2)
+        cv.putText(img, "Strain X: {:.2f} %".format(x_strain), (margin, 240), font, scale, strain_colors[0], 2)
+        cv.putText(img, "Strain Y: {:.2f} %".format(y_strain), (margin, 300), font, scale, strain_colors[1], 2)
+        cv.putText(img, "Area strain: {:.2f} %".format(a_strain), (margin, 360), font, scale, black, 2)
 
     return img
+
+
+def draw_state_visualization(img, visual, electrical):
+    r = 20
+    margin = 20
+    font = cv.FONT_HERSHEY_SIMPLEX
+    scale = 1.5
+    black = (0, 0, 0)
+    green = (0, 200, 0)
+    red = (0, 0, 255)
+    amber = (0, 200, 255)
+
+    state_colors = (red, green, amber)
+
+    combined = None
+    if visual is not None:
+        cv.putText(img, "Visual state", (2 * (margin + r), img.shape[0] - margin - 5), font, scale, black, 2)
+        c = state_colors[visual]
+        cv.circle(img, (margin + r, img.shape[0] - margin - r), r, c, -1)
+        combined = visual
+
+    if electrical is not None:
+        cv.putText(img, "Electrical state", (2 * (margin + r), img.shape[0] - margin - 65), font, scale, black, 2)
+        c = state_colors[electrical]
+        cv.circle(img, (margin + r, img.shape[0] - margin - r - 60), r, c, -1)
+        combined = electrical
+
+    if visual is not None and electrical is not None:  # both state is given
+        if visual == electrical == 1:
+            combined = 1
+        elif visual == 1 and electrical == 2:
+            combined = 2
+        else:
+            combined = 0
+
+    if combined is not None:
+        c = state_colors[combined]
+        r = 160
+        cv.circle(img, (margin + r, img.shape[0] - margin - r - 2 * 60), r, c, -1)
 
 
 if __name__ == '__main__':
@@ -608,7 +674,7 @@ if __name__ == '__main__':
     duallog.setup("logs", minlevelConsole=logging.DEBUG, minLevelFile=logging.DEBUG)
 
     # test_image_folder = "D:/NERD output/NERD test 20200225-182457/DEA 1/Images/"
-    test_image_folder = "../../output/Test1/"
+    test_image_folder = "../../output/Test0/"
     files = os.listdir(test_image_folder)
 
     _strain_detector = StrainDetector()
@@ -630,10 +696,13 @@ if __name__ == '__main__':
         # _res_img = visualize_result(_img, _ellipse)
         # _result_images = [_res_img]
 
-        cv.imshow("Image", _result_images[0])
+        _img = _result_images[0]
+        draw_state_visualization(_img, _outlier[0], None)
+
+        cv.imshow("Image", _img)
         cv.waitKey()
         cv.imwrite(os.path.join(test_image_folder + "Results", file), _result_images[0])
 
     cv.destroyAllWindows()
-    toc = time.perf_counter()
-    print("elapsed time: ", toc - tic)
+    # toc = time.perf_counter()
+    # print("elapsed time: ", toc - tic)

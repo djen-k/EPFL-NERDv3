@@ -1,27 +1,39 @@
-def write_config(fname, com_port, cam_order, voltage):
+def write_config(fname, config):
+    lines = ["{}:{}\n".format(key, val) for key, val in config.items()]
+
     file = open(fname, "w")
-
-    file.write(com_port + "\n")
-    file.write("{}\n".format(voltage))
-    file.write("{}".format(cam_order))
-
+    file.writelines(lines)
     file.close()
 
 
 def read_config(fname):
+    # read all lines from file
     file = open(fname, "r+")
-
-    com_str = file.readline()
-    v_str = file.readline()
-    cam_str = file.readline()
-
+    lines = file.readlines()
     file.close()
 
-    com_port = com_str.strip()  # remove newline character at the end
+    config = {}
 
-    voltage = int(v_str.strip())
+    # interpret
+    for line in lines:
+        line = line.strip()  # remove newline character at the end
+        line = line.split(":")
+        key = line[0]
+        val = line[1]
 
-    cam_str = cam_str[1: -1]
-    cam_order = [int(s) for s in cam_str.split(", ")]
+        if key == "cam_order":
+            val = val[1: -1]
+            val = [int(s) for s in val.split(", ")]
+        elif val == "True":
+            val = True
+        elif val == "False":
+            val = False
+        else:
+            try:  # try to convert to numeric value
+                val = int(val)
+            except ValueError:
+                pass  # not a number  -> just keep it as a string value
 
-    return com_port, cam_order, voltage
+        config[key] = val
+
+    return config

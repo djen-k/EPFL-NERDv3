@@ -1,6 +1,6 @@
-import PyQt5.QtCore
 import PyQt5.QtGui
 import cv2
+from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QPixmap
 
 
@@ -16,6 +16,6 @@ def conv_Qt(rawImage, dimensions=None):
     convert_to_qt_format = PyQt5.QtGui.QPixmap.fromImage(convert_to_qt_format)
 
     pixmap = QPixmap(convert_to_qt_format)
-    resized_image = pixmap.scaled(dimensions[0], dimensions[1], PyQt5.QtCore.Qt.KeepAspectRatio)
+    resized_image = pixmap.scaled(dimensions[0], dimensions[1], Qt.KeepAspectRatio, Qt.SmoothTransformation)
 
     return resized_image

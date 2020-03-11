@@ -4,6 +4,7 @@ from datetime import datetime
 from threading import Thread, Event
 
 import cv2 as cv
+import numpy as np
 
 from libs.duallog import duallog
 
@@ -20,7 +21,7 @@ class Camera:
             self.set_resolution(desired_resolution)
 
         # init buffers
-        self.name = "Camera {}".format(index)
+        self.name = "Camera {}".format(index + 1)  # use 1-based indexing for natural names
         self.image_buffer = None
         self.grab_timestamp = None  # timestamp for the last grab
         self.image_timestamp = None  # timestamp for image in buffer. May differ from grab_timestamp if retrieve failed
@@ -407,12 +408,24 @@ class ImageCapture:
 
         return None  # in case anything failed
 
+    def read_average(self, n):
+        """
+        Read several images and average them (for each camera)
+        :param n: How many images to average
+        :return: A set of averaged images
+        """
+        image_sets = [self.read_images() for i in range(n)]
+        image_sets = np.array(image_sets)
+        avgs = np.mean(image_sets, axis=0).round().astype(np.uint8)
+        avgs = list(avgs)
+
+        return avgs
+
     def get_images_from_buffer(self):
         """
         Get the last image of each selected camera from the image buffer
-        :return: A copy of the image buffer
+        :return: A list of image from the buffer
         """
-        # create a copy of the image buffer to ensure we always keep an unadulterated copy
         return [cam.get_image_from_buffer() for cam in self._cameras]
 
     def get_timestamps(self):
