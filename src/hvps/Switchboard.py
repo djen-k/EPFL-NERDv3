@@ -12,6 +12,7 @@ class SwitchBoard(HVPS):
 
     def __del__(self):
         try:
+            self.set_voltage(0, wait=True)
             self.set_relays_off()
         except Exception as ex:
             self.logging.warning("Unable to switch off the relays: {}".format(ex))

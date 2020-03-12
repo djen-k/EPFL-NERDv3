@@ -1,10 +1,11 @@
 import logging
 import math
+import os
 import time
 
 import cv2
 from PyQt5 import QtWidgets, QtSerialPort, QtGui
-from PyQt5.QtCore import Qt, QThread
+from PyQt5.QtCore import Qt
 
 from src.gui import QtImageTools
 from src.hvps import NERDHVPS
@@ -109,11 +110,11 @@ class SetupDialog(QtWidgets.QDialog):
 
         # create measurement period selector
         self.num_measurement_period = self.create_num_selector(0, 1000, "measurement_period_s", 10)
-        formLay.addRow("Measure every _ s:", self.num_measurement_period)
+        formLay.addRow("Measure every (s):", self.num_measurement_period)
 
         # create image save period selector
         self.num_save_image_period = self.create_num_selector(0, 1000, "image_save_period_min", 30)
-        formLay.addRow("Save images every _ min:", self.num_save_image_period)
+        formLay.addRow("Save images every (min):", self.num_save_image_period)
 
         # checkbox to enable AC mode
         self.chk_ac = QtWidgets.QCheckBox("AC mode")
@@ -190,11 +191,29 @@ class SetupDialog(QtWidgets.QDialog):
         self.btnReference = QtWidgets.QPushButton("Record strain reference")
         self.btnReference.clicked.connect(self.record_strain_reference)
 
+        # create number of average images for strain ref selector
+        self.num_avg_img = self.create_num_selector(1, 100, "average_images", 10)
+        self.num_avg_img.setMaximumWidth(40)
+
+        # button to load strain reference from previous test
+        self.btnLoadReference = QtWidgets.QPushButton("Load reference from previous test...")
+        self.btnLoadReference.clicked.connect(self.load_strain_reference)
+
+        # button to load strain reference from previous test
+        self.lblStrainRef = QtWidgets.QLabel("No strain reference set!")
+        self.lblStrainRef.setStyleSheet("QLabel { color : red }")
+
         buttonLay = QtWidgets.QHBoxLayout()
         buttonLay.setAlignment(Qt.AlignLeft)
         buttonLay.addWidget(self.btnCapture)
         buttonLay.addWidget(self.chkStrain)
         buttonLay.addWidget(self.btnReference)
+        buttonLay.addWidget(QtWidgets.QLabel("Average images:"))
+        buttonLay.addWidget(self.num_avg_img)
+        buttonLay.addSpacerItem(QtWidgets.QSpacerItem(20, 1))
+        buttonLay.addWidget(self.btnLoadReference)
+        buttonLay.addSpacerItem(QtWidgets.QSpacerItem(20, 1))
+        buttonLay.addWidget(self.lblStrainRef)
         buttonLay.addSpacerItem(QtWidgets.QSpacerItem(20, 1))
         buttonLay.addWidget(self.btnStart)
 
@@ -328,21 +347,53 @@ class SetupDialog(QtWidgets.QDialog):
 
     def record_strain_reference(self):
         # TODO: protect against impatient clicks
+
         cap = self._image_capture
-        image_sets = cap.read_average(10)
+        images = cap.read_average(self.num_avg_img.value())
         order = self.getCamOrder()
         order_filt = [i for i in order if i >= 0]  # filter to remove unused cameras (-1)
-        image_sets = [image_sets[i] for i in order_filt]  # put image sets in the right order
+        images = [images[i] for i in order_filt]  # put image sets in the right order
 
+        self._set_strain_reference(images)
+
+    def _set_strain_reference(self, images):
         self._strain_detector = StrainDetection.StrainDetector()
-        self._strain_detector.set_reference(image_sets)
+        self._strain_detector.set_reference(images)
 
         self.chkStrain.setEnabled(True)
         self.chkStrain.setChecked(True)
 
-        cap.read_images()  # read one new set because refreshImages just grabs the images from the buffer
+        self.lblStrainRef.setText("Strain reference OK")
+        self.lblStrainRef.setStyleSheet("QLabel { color : green }")
+
         self.refreshImages()
-        QThread.currentThread().eventDispatcher().flush()
+
+    def load_strain_reference(self):
+        folder = "output"
+        caption = "Select the output folder of a previous NERD test"
+        dir_path = QtWidgets.QFileDialog.getExistingDirectory(self, caption, folder)
+
+        refs = []
+        for i in range(self._n_deas):
+            fpath = os.path.join(dir_path, "DEA {}".format(i), "Images")
+            if os.path.isdir(fpath):
+                try:
+                    files = os.listdir(fpath)
+                    for f in files:
+                        if f.endswith("reference.png"):
+                            f = os.path.join(fpath, f)
+                            refs.append(cv2.imread(f))
+                except Exception as ex:
+                    self.logging.debug("Error loading reference image: {}".format(ex))
+
+        camorder = self.getCamOrder()
+        cams_in_use = len(camorder) - camorder.count(-1)
+        if len(refs) == cams_in_use:
+            self._set_strain_reference(refs)
+        else:
+            QtWidgets.QMessageBox.warning(self, "Reference does not match",
+                                          "The selected reference does not match the selected number of active cameras",
+                                          QtWidgets.QMessageBox.Ok)
 
     def btnVoltageClicked(self):
 
@@ -351,11 +402,15 @@ class SetupDialog(QtWidgets.QDialog):
                 # turn on and set voltage
                 self._hvps.set_relay_auto_mode()
                 self._hvps.set_voltage(self.num_voltage.value(), wait=True)
+                self.btn_apply_voltage.setText("Turn voltage off!")
+                self.btn_apply_voltage.setStyleSheet("QPushButton{ color: red }")
             else:
-                self._hvps.set_voltage(0)
+                self._hvps.set_voltage(0, wait=True)
                 self._hvps.set_relays_off()
+                self.btn_apply_voltage.setText("Apply voltage now!")
+                self.btn_apply_voltage.setStyleSheet("QPushButton{ color: black }")
 
-            time.sleep(0.5)
+            time.sleep(3)
             # capture new images to show strain
             self.btnCaptureClicked()
         else:
@@ -403,10 +458,12 @@ class SetupDialog(QtWidgets.QDialog):
                 self.chkStrain.setEnabled(False)
                 self.chkStrain.setChecked(False)
                 self._strain_detector = None
-                QtWidgets.QMessageBox.information(self, "Strain reference no longer valid", "Since the camera order "
-                                                                                            "changed, the strain reference is no longer valid! Please set a new"
-                                                                                            "strain reference",
-                                                  QtWidgets.QMessageBox.Ok)
+                self.lblStrainRef.setText("No strain reference set!")
+                self.lblStrainRef.setStyleSheet("QLabel { color : red }")
+                dtitle = "Strain reference no longer valid"
+                dmsg = "Since the camera order changed, the strain reference is no longer valid!\n" \
+                       "Please set a new strain reference"
+                QtWidgets.QMessageBox.information(self, dtitle, dmsg, QtWidgets.QMessageBox.Ok)
 
             self.refreshImages()
         except Exception as ex:
@@ -522,6 +579,7 @@ class SetupDialog(QtWidgets.QDialog):
             "save_image_period_min": self.num_save_image_period.value(),
             "ac_mode": self.chk_ac.isChecked(),
             "ac_frequency": self.num_ac_frequency.value(),
+            "average_images": self.num_avg_img.value()
         }
 
         return config, self._strain_detector

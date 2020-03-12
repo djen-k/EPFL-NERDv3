@@ -16,10 +16,9 @@ def read_config(fname):
 
     # interpret
     for line in lines:
-        line = line.strip()  # remove newline character at the end
         line = line.split(":")
-        key = line[0]
-        val = line[1]
+        key = line[0].strip()  # strip to remove any whitespace
+        val = line[1].strip()
 
         if key == "cam_order":
             val = val[1: -1]
