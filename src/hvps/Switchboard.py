@@ -125,6 +125,29 @@ class SwitchBoard(HVPS):
             return str_state  # return the original message so as not to withhold information
         return state
 
+    def dirty_reconnect(self, timeout=10):
+        self.ser.close()
+        try:
+            self.ser.open()
+        except:
+            self.logging.critical("Reconnextion attempt failed... retry in 500ms")
+        start = time.monotonic()
+        elapsed = 0
+        while not self.ser.is_open and elapsed < timeout:
+            time.sleep(0.5)
+            self.ser.close()
+            try:
+                self.ser.open()
+            except:
+                self.logging.critical("Reconnextion attempt failed... retry in 500ms")
+
+            elapsed = time.monotonic() - start
+
+        if self.ser.is_open:
+            self.logging.critical("Reconnected! (?)")
+        else:
+            self.logging.critical("Failed to reconnect!")
+
 
 if __name__ == '__main__':
     sb = SwitchBoard()

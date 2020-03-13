@@ -36,9 +36,10 @@ class DataSaver:
             self.dataFields.append("DEA{}_electrical_state".format(i))
             self.dataFields.append("DEA{}_visual_state".format(i))
             # self.dataFields.append("DEA{}_resistance".format(i))
+            self.dataFields.append("DEA{}_strain_area".format(i))
             self.dataFields.append("DEA{}_strain_X".format(i))
             self.dataFields.append("DEA{}_strain_Y".format(i))
-            self.dataFields.append("DEA{}_strain_area".format(i))
+            self.dataFields.append("DEA{}_strain_average".format(i))
             self.dataFields.append("DEA{}_center_X".format(i))
             self.dataFields.append("DEA{}_center_Y".format(i))
 
@@ -51,6 +52,7 @@ class DataSaver:
             self.units.append("[1: OK, 0: Failed]")
             self.units.append("[1: OK, 0: Failed]")
             # self.units.append("[Ohm]")
+            self.units.append("[%]")
             self.units.append("[%]")
             self.units.append("[%]")
             self.units.append("[%]")
@@ -71,7 +73,7 @@ class DataSaver:
         self.file.flush()
 
     def write_data(self, timestamp, elapsed_time, time_at_max_V, test_state, target_voltage, measured_voltage,
-                   electrical_state=None, visual_state=None, strain_XYa=None, center_shift=None, resistance=None,
+                   electrical_state=None, visual_state=None, strain_AXYa=None, center_shift=None, resistance=None,
                    image_saved=False):
 
         data = self.getDictField()
@@ -91,10 +93,11 @@ class DataSaver:
                 data["DEA{}_visual_state".format(i)] = electrical_state[i]
             if resistance is not None and i < len(resistance):
                 data["DEA{}_resistance".format(i)] = resistance[i]
-            if strain_XYa is not None and i < strain_XYa.shape[0]:
-                data["DEA{}_strain_X".format(i)] = strain_XYa[i, 0]
-                data["DEA{}_strain_Y".format(i)] = strain_XYa[i, 1]
-                data["DEA{}_strain_area".format(i)] = strain_XYa[i, 2]
+            if strain_AXYa is not None and i < strain_AXYa.shape[0]:
+                data["DEA{}_strain_area".format(i)] = strain_AXYa[i, 0]
+                data["DEA{}_strain_X".format(i)] = strain_AXYa[i, 1]
+                data["DEA{}_strain_Y".format(i)] = strain_AXYa[i, 2]
+                data["DEA{}_strain_average".format(i)] = strain_AXYa[i, 3]
             if center_shift is not None and i < center_shift.shape[0]:
                 data["DEA{}_center_X".format(i)] = center_shift[i, 0]
                 data["DEA{}_center_Y".format(i)] = center_shift[i, 1]

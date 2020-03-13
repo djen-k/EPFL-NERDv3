@@ -383,6 +383,7 @@ class SetupDialog(QtWidgets.QDialog):
                         if f.endswith("reference.png"):
                             f = os.path.join(fpath, f)
                             refs.append(cv2.imread(f))
+                            break
                 except Exception as ex:
                     self.logging.debug("Error loading reference image: {}".format(ex))
 

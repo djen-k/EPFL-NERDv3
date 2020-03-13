@@ -8,7 +8,7 @@ logger = logging.getLogger("Strain Detection")
 
 class StrainDetector:
 
-    def __init__(self):
+    def __init__(self, query_angles=(0, 90)):
 
         self.logging = logging.getLogger("StrainDetector")
 
@@ -18,12 +18,14 @@ class StrainDetector:
         self._exclude_masks = None  # masks defining areas to exclude (for faster electrode outline detection)
         self._reference_radii = None
         self._reference_centers = None
+        self._reference_pseudo_areas = None
         self.setting_reference = False
 
-        self.query_angles = np.array([0, 90])
+        self.query_angles = np.array(query_angles)
         self._strain_threshold = 50  # above 50 % strain can be considered an outlier
         self._neg_strain_threshold = -10  # below -10 % strain can be considered an outlier
         self._shift_threshold = 100  # above 100 px shift along either axis can be considered an outlier
+        self._image_deviation_threshold = 0.15  # if the average deviation is more than 15%, something bad happened
 
     def set_reference(self, reference_images):
         self._reference_images = None
@@ -65,7 +67,7 @@ class StrainDetector:
             if self._reference_images is not None:
                 img_dev = self.get_deviation_from_reference(imgs)
                 self.logging.debug("Image deviations: {}".format(img_dev))
-                outlier = np.bitwise_or(outlier, np.array(img_dev) > 0.15)
+                outlier = np.bitwise_or(outlier, np.array(img_dev) > self._image_deviation_threshold)
 
         # initialize lists to store results
         ellipses = [None] * n_img
@@ -87,6 +89,8 @@ class StrainDetector:
         ellipses_np = ellipses_to_numpy_array(ellipses)  # get as numpy array
         xy_radii = ellipse_radius_at_angle(ellipses_np, self.query_angles)
         centers = ellipses_np[:, 0:2]
+        # pseudo because we don't bother multiplying by pi; divide by 4 because ellipse uses diameter not radius
+        pseudo_areas = np.prod(ellipses_np[:, 2:4], axis=1) / 4
 
         # if there is not yet any reference for strain measurements, set these ellipses as the reference
         if self._reference_ellipses is None:
@@ -102,12 +106,14 @@ class StrainDetector:
             self._reference_ellipses = ellipses
             self._reference_radii = xy_radii
             self._reference_centers = centers
+            self._reference_pseudo_areas = pseudo_areas
             title = "Reference"  # to be displayed on the result image
 
         # calculate strain and shift
         strain = xy_radii / self._reference_radii
-        strain_area = np.prod(xy_radii, axis=1) / np.prod(self._reference_radii, axis=1)
-        strain_all = np.concatenate((strain, np.reshape(strain_area, (-1, 1))), axis=1)
+        strain_area = pseudo_areas / self._reference_pseudo_areas
+        strain_avg = np.sqrt(strain_area)
+        strain_all = np.concatenate((np.reshape(strain_area, (-1, 1)), strain, np.reshape(strain_avg, (-1, 1))), axis=1)
         strain_all = strain_all * 100 - 100  # convert to engineering strain
         center_shift = centers - self._reference_centers
 
@@ -134,9 +140,8 @@ class StrainDetector:
         res_imgs = None
         if output_result_image:
             # create a list of flags indicating the DEA state (as determined visually) or non to disable the indicator
-
             res_imgs = [visualize_result(imgs[i], ellipses[i], tuple(xy_radii[i, :]), tuple(self.query_angles),
-                                         self._reference_ellipses[i], strain_all[i, :], title=title)
+                                         self._reference_ellipses[i], strain_all[i, -1], title=title)
                         for i in range(len(imgs))]
 
         return strain_all, center_shift, res_imgs, visual_state
@@ -562,7 +567,7 @@ def visualize_result(img, ellipse, radii=None, angles=None, reference_ellipse=No
     Visualizes the strain detection result by drawing the detected ellipse on the image. Can also show specific radial
     strain values at certain angles.
     :param title: text to be displayed on the image
-    :param strain: The detected strain values
+    :param strain: The detected strain (single value!)
     :param img: The image to draw the visualization on
     :param ellipse: The detected ellipse to draw on the image. In OpenCV ellipse format: ((cx, cy), (r1, r2), angle)
     :param reference_ellipse: the reference ellipse
@@ -592,6 +597,9 @@ def visualize_result(img, ellipse, radii=None, angles=None, reference_ellipse=No
 
     # draw radial strain
     if radii is not None and angles is not None:
+        assert len(radii) == len(angles)
+        # duplicate colors to make sure we have enough for each radius
+        strain_colors = strain_colors * int(np.ceil(len(radii) / len(strain_colors)))
         center, diam, angle = ellipse
         for r, a, c in zip(radii, angles, strain_colors):
             p1, p2 = draw_diameter(img, center, r, a, c, 1)
@@ -608,10 +616,7 @@ def visualize_result(img, ellipse, radii=None, angles=None, reference_ellipse=No
         cv.putText(img, "Reference ellipse", (margin, 180), font, scale, green, 2)
 
     if strain is not None:
-        x_strain, y_strain, a_strain = strain  # split
-        cv.putText(img, "Strain X: {:.2f} %".format(x_strain), (margin, 240), font, scale, strain_colors[0], 2)
-        cv.putText(img, "Strain Y: {:.2f} %".format(y_strain), (margin, 300), font, scale, strain_colors[1], 2)
-        cv.putText(img, "Area strain: {:.2f} %".format(a_strain), (margin, 360), font, scale, black, 2)
+        cv.putText(img, "Strain: {:.1f} %".format(strain), (margin, 240), font, scale, black, 2)
 
     return img
 
@@ -681,10 +686,10 @@ if __name__ == '__main__':
     duallog.setup("logs", minlevelConsole=logging.DEBUG, minLevelFile=logging.DEBUG)
 
     # test_image_folder = "D:/NERD output/NERD test 20200225-182457/DEA 1/Images/"
-    test_image_folder = "../../output/Test4/"
+    test_image_folder = "../../output/Test7/"
     files = os.listdir(test_image_folder)
 
-    _strain_detector = StrainDetector()
+    _strain_detector = StrainDetector((0, 90))
 
     tic = time.perf_counter()
     ref_img = None
@@ -696,12 +701,19 @@ if __name__ == '__main__':
         if ref_img is None:
             ref_img = _img
 
-        # print("File:", file)
-        # _result_strain, _result_center_shift, \
-        # _result_images, _outlier = _strain_detector.get_dea_strain([_img], True, True)
+        print("File:", file)
+        _result_strain, _result_center_shift, \
+        _result_images, _outlier = _strain_detector.get_dea_strain([_img], True, True)
+        print("Strain:", _result_strain)
+        print("Area strain:", _result_strain[0, 0])
+        print("Average strain:", _result_strain[0, -1])
+        print("Average approx:", np.mean(_result_strain[0, 1:-1]))
+
+        cv.imshow("Difference", _result_images[0])
+        cv.waitKey()
+
         # print("Outlier: ", _outlier)
         #
-        # print("Strain:", _result_strain[0, 0] * 100 - 100, " %    , ", _result_strain[0, 1] * 100 - 100, " %")
         # print("Shift:", _result_center_shift[0])
         # _ellipse, _mask = dea_fit_ellipse(_img)
         # _res_img = visualize_result(_img, _ellipse)
@@ -709,18 +721,18 @@ if __name__ == '__main__':
 
         # _img = _result_images[0]
         # draw_state_visualization(_img, _outlier[0], None)
-        if ref_img is not None and ref_img.shape == _img.shape:
-            _dev_img = np.abs(_img.astype(np.int16) - ref_img.astype(np.int16))
-            dev = np.mean(_dev_img) / 255
-            print("Deviation: ", dev)
-            _dev_img = np.abs(_img.astype(np.int16) - ref_img.astype(np.int16)).astype(np.uint8)
-            dev = np.mean(_dev_img) / 255
-            print("Deviation: ", dev)
-
-            cv.imshow("Image1", _img)
-            cv.imshow("Image2", ref_img)
-            cv.imshow("Difference", _dev_img)
-            cv.waitKey()
+        # if ref_img is not None and ref_img.shape == _img.shape:
+        #     _dev_img = np.abs(_img.astype(np.int16) - ref_img.astype(np.int16))
+        #     dev = np.mean(_dev_img) / 255
+        #     print("Deviation: ", dev)
+        #     _dev_img = np.abs(_img.astype(np.int16) - ref_img.astype(np.int16)).astype(np.uint8)
+        #     dev = np.mean(_dev_img) / 255
+        #     print("Deviation: ", dev)
+        #
+        #     cv.imshow("Image1", _img)
+        #     cv.imshow("Image2", ref_img)
+        #     cv.imshow("Difference", _dev_img)
+        #     cv.waitKey()
 
         # cv.imwrite(os.path.join(test_image_folder + "Results", file), _result_images[0])
 

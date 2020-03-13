@@ -134,6 +134,8 @@ class NERD:
         ref_imgs, ref_res_imgs = self.strain_detector.get_reference_images()
         imsaver.save_all(ref_imgs, now_tstamp, ref_res_imgs, suffix="reference")
 
+        time.sleep(1)  # just wait a second so the timestamp for the first image is not the same as the reference
+
         # apply user config ######################################################################
 
         max_voltage = self.config["voltage"]
@@ -216,13 +218,14 @@ class NERD:
                 if dt_state_change > duration_low_s:
                     new_state = STATE_RAMP
                     new_step = 0  # reset steps
-                    while new_target_voltage < min_voltage:
-                        new_step += 1  # increase step
-                        new_target_voltage = round(new_step * voltage_step)
             elif current_state == STATE_RAMP:
                 if dt_state_change > step_duration_s:
                     new_step = current_step + 1
                     new_target_voltage = round(new_step * voltage_step)
+                    # make sure we
+                    while new_target_voltage < min_voltage:
+                        new_step += 1  # increase step
+                        new_target_voltage = round(new_step * voltage_step)
                     if new_step > nsteps:
                         new_state = STATE_WAITING_HIGH
                         new_target_voltage = max_voltage
@@ -301,7 +304,7 @@ class NERD:
                 vs = "{} V".format(measuredVoltage)
                 strain, center_shifts, res_imgs, vis_state = self.strain_detector.get_dea_strain(imgs, True, True, vs)
                 # print average strain for each DEA
-                self.logging.info("strain [%]: {}".format(np.reshape(np.mean(strain[:, 0:2], 1), (1, -1))))
+                self.logging.info("strain [%]: {}".format(np.reshape(strain[:, -1], (1, -1))))
 
                 if 0 in vis_state:  # 0 means outlier, 1 means OK
                     self.logging.warning("Outlier detected")
