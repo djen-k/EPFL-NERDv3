@@ -243,6 +243,7 @@ class ImageCapture:
         Opens all available image capture devices and stores a handle to each device as well as a list of device names
         (currently just "Camera [index]"). One initial image from each camera is retrieved and stored in the buffer.
         Can be used to re-initialize the cameras.
+        :return: A list of the available cameras
         """
 
         self._reset()  # release all cams and empty buffers
@@ -254,8 +255,8 @@ class ImageCapture:
             # if camera was already open, it will be closed and re-opened internally
             cam = Camera(i, self.desired_resolution, self._new_image_callback)
 
-            if not cam.isOpened():
-                break  # if unable to open, a camera with this index doesn't exist. Stop search.
+            if not cam.isOpened():  # a camera with this index doesn't exist or it is in use
+                break  # if not expecting any more or tried at least the expected number of cams, stop search.
             else:
                 self.logging.info("{} opened".format(cam.name))
                 success, frame = cam.read()  # check if we can read an image
@@ -354,8 +355,11 @@ class ImageCapture:
         :return: a list of flags indicating success, and a list of the retrieved frames
         """
         res = [cam.retrieve() for cam in self._cameras]
-        # turn list of tuples [(suc, frame), ...] into two lists [suc, ...], [frame, ...]
-        return [list(o) for o in zip(*res)]
+        # turn list of tuples [(suc, frame), ...] into tuple of lists ([suc, ...], [frame, ...])
+        res = [list(o) for o in zip(*res)]
+        if len(res) == 0:
+            res = ([], [])  # make sure two empty lists are returned if no cameras are found to match the expected type
+        return res
 
     def read_images(self):
         """
@@ -415,10 +419,20 @@ class ImageCapture:
         :return: A set of averaged images
         """
         image_sets = [self.read_images() for i in range(n)]
-        image_sets = np.array(image_sets)
-        avgs = np.mean(image_sets, axis=0).round().astype(np.uint8)
-        avgs = list(avgs)
-
+        image_sets_np = np.array(image_sets)
+        if image_sets_np.ndim == 4:  # all images are the same size and have been combined into a numeric array
+            avgs = np.mean(image_sets_np, axis=0).round().astype(np.uint8)
+            avgs = list(avgs)
+        elif image_sets_np.ndim == 2:  # images are of different size and could not be combined into a numeric array
+            avgs = []
+            for i in range(len(image_sets[0])):  # iterate over number of cams
+                img_set = [sets[i] for sets in image_sets]
+                img_set = np.array(img_set)
+                avg = np.mean(img_set, axis=0).round().astype(np.uint8)
+                avgs.append(avg)
+        else:
+            self.logging.critical("Image sets for averaging have unexpected shape...?!")
+            raise Exception("Image sets for averaging have unexpected shape...?!")
         return avgs
 
     def get_images_from_buffer(self):

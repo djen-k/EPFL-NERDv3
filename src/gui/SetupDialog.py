@@ -7,7 +7,7 @@ import cv2
 from PyQt5 import QtWidgets, QtSerialPort, QtGui
 from PyQt5.QtCore import Qt
 
-from src.gui import QtImageTools
+from src.gui import QtImageTools, Screen
 from src.hvps import NERDHVPS
 from src.image_processing import ImageCapture, StrainDetection
 
@@ -32,7 +32,10 @@ class SetupDialog(QtWidgets.QDialog):
         self._n_deas = n_deas
         n_cols = 3
 
-        self._default_img_size = [720, 405]  # [800, 450]  [640, 360]
+        # self._preview_img_size = [640, 360]  # [720, 405]  # [800, 450]
+        img_size = [1920, 1080]
+        self._preview_img_size = Screen.get_max_size_on_screen(img_size, (2, 3), (80, 600))
+        self._adjustment_view_size = Screen.get_max_size_on_screen(img_size, margin=(20, 100))
 
         # register callback
         # image_capture.set_new_image_callback(self.updateImage)
@@ -46,7 +49,7 @@ class SetupDialog(QtWidgets.QDialog):
         # return values
         self._camorder = [-1] * n_deas
         self._image_buffer = [QtImageTools.conv_Qt(ImageCapture.ImageCapture.IMG_WAITING,
-                                                   self._default_img_size)] * n_deas
+                                                   self._preview_img_size)] * n_deas
 
         if "cam_order" in self._defaults:
             co = self._defaults["cam_order"]
@@ -144,7 +147,7 @@ class SetupDialog(QtWidgets.QDialog):
             grpLay = QtWidgets.QVBoxLayout()
             # add label to show image
             lbl = QtWidgets.QLabel()
-            lbl.setFixedSize(self._default_img_size[0], self._default_img_size[1])
+            lbl.setFixedSize(self._preview_img_size[0], self._preview_img_size[1])
             lbl.setPixmap(self._image_buffer[i])  # initialize with waiting image
             self.lbl_image.append(lbl)
 
@@ -298,8 +301,15 @@ class SetupDialog(QtWidgets.QDialog):
             QtWidgets.QMessageBox.warning(self, "No strain reference",
                                           "To start a measurement, please set a strain reference!",
                                           QtWidgets.QMessageBox.Ok)
-        else:
-            self.accept()
+            return
+
+        if self.cbb_port_name.currentText() == "":
+            QtWidgets.QMessageBox.warning(self, "No Switchboard/HVPS specified",
+                                          "To start a measurement, please select a switchboard/HVPS!",
+                                          QtWidgets.QMessageBox.Ok)
+            return
+
+        self.accept()
 
     def chkACClicked(self):
         self.num_ac_frequency.setEnabled(self.chk_ac.isChecked())
@@ -401,6 +411,8 @@ class SetupDialog(QtWidgets.QDialog):
         if self._hvps is not None:
             if self.btn_apply_voltage.isChecked():
                 # turn on and set voltage
+                # TODO: turn switch mode back on once the opto-couplers work correctly
+                self._hvps.set_switching_mode(1)  # set to DC mode to make sure that the HV indicator LED works
                 self._hvps.set_relay_auto_mode()
                 self._hvps.set_voltage(self.num_voltage.value(), wait=True)
                 self.btn_apply_voltage.setText("Turn voltage off!")
@@ -426,7 +438,9 @@ class SetupDialog(QtWidgets.QDialog):
         ret = -1
         while ret == -1:
             try:
-                cv2.imshow("DEA {} - Press any key to close".format(i_dea), self._image_capture.read_single(i_cam))
+                img = self._image_capture.read_single(i_cam)
+                img = cv2.resize(img, self._adjustment_view_size)
+                cv2.imshow("DEA {} - Press any key to close".format(i_dea + 1), img)
                 ret = cv2.waitKey(100)
                 self.logging.debug("Key pressed {}".format(ret))
             except Exception as ex:
@@ -600,7 +614,7 @@ class SetupDialog(QtWidgets.QDialog):
                 # see if the newly found camera is defined in the default cam order
                 dea_id = self._cam_order_default.index(cam_id)
                 self.cbb_camera_select[dea_id].setCurrentIndex(cam_id + 1)  # should be the index of the new cam
-                self.lbl_image[dea_id].setPixmap(QtImageTools.conv_Qt(image, self._default_img_size))
+                self.lbl_image[dea_id].setPixmap(QtImageTools.conv_Qt(image, self._preview_img_size))
             except ValueError:
                 pass  # not found, so we leave target DEA index at -1
         else:
@@ -608,12 +622,12 @@ class SetupDialog(QtWidgets.QDialog):
             for i in range(self._n_deas):
                 i_sel = self._camorder[i]
                 if i_sel == cam_id:
-                    self.lbl_image[i].setPixmap(QtImageTools.conv_Qt(image, self._default_img_size))
+                    self.lbl_image[i].setPixmap(QtImageTools.conv_Qt(image, self._preview_img_size))
 
                 # if camera index for any dea is -1 ("not used"), show the not available image
                 elif i_sel == -1:
                     self.lbl_image[i].setPixmap(
-                        QtImageTools.conv_Qt(ImageCapture.ImageCapture.IMG_NOT_AVAILABLE, self._default_img_size))
+                        QtImageTools.conv_Qt(ImageCapture.ImageCapture.IMG_NOT_AVAILABLE, self._preview_img_size))
 
     def updateImages(self, images, timestamps):
 

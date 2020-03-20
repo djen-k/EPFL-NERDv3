@@ -19,6 +19,19 @@ class SwitchBoard(HVPS):
 
         super().__del__()
 
+    def close(self):
+        """Closes connection with the HVPS"""
+        self.stop_voltage_reading()
+        time.sleep(0.1)
+        self.serial_com_lock.acquire()
+        if self.ser.is_open:
+            self.set_voltage(0, wait=True)  # set the voltage to 0 as a safety measure
+            self.set_relays_off()
+            self.ser.close()
+        self.is_open = False
+        self.current_device = None
+        self.serial_com_lock.release()
+
     def set_relay_auto_mode(self, reconnect_timeout=0):
         """
         Enable the automatic short circuit detection and isolation function of the switchboard

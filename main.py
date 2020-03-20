@@ -6,13 +6,13 @@ from datetime import datetime
 
 import cv2 as cv
 import numpy as np
-from PyQt5.QtWidgets import QMainWindow, QWidget, QVBoxLayout, QApplication
+from PyQt5.QtWidgets import QMainWindow, QWidget, QVBoxLayout, QApplication, QMessageBox
 
 from libs import duallog
 from src.fileio.DataSaver import DataSaver
 from src.fileio.ImageSaver import ImageSaver
 from src.fileio.config import read_config, write_config
-from src.gui import SetupDialog
+from src.gui import SetupDialog, Screen
 from src.hvps import NERDHVPS
 from src.image_processing import ImageCapture, StrainDetection
 
@@ -100,8 +100,13 @@ class NERD:
         self.n_dea = self.image_cap.get_camera_count()  # this works if we previously selected the cameras
         self.strain_detector = strain_detector
 
-        # connect up HVPS
-        self.hvpsInst = NERDHVPS.init_hvps(self.config["com_port"])
+        # connect to HVPS
+        try:
+            self.hvpsInst = NERDHVPS.init_hvps(self.config["com_port"])
+        except Exception as ex:
+            self.logging.critical("Unable to connect to HVPS: {}".format(ex))
+            QMessageBox.critical(None, "Unable to connect to HVPS/Switchboard!",
+                                 "Could not connect to HVPS/Switchboard", QMessageBox.Ok)
 
         # init some internal variable
         self.shutdown_flag = False
@@ -136,6 +141,12 @@ class NERD:
 
         time.sleep(1)  # just wait a second so the timestamp for the first image is not the same as the reference
 
+        # calculate image size for GUI #######################################################################
+
+        # preview_image_size = (720, 405)
+        img_shape = ref_imgs[0].shape
+        preview_image_size = Screen.get_max_size_on_screen((img_shape[1], img_shape[0]), (2, 3), (20, 60))
+
         # apply user config ######################################################################
 
         max_voltage = self.config["voltage"]
@@ -152,10 +163,9 @@ class NERD:
 
         # set up HVPS ##############################################################################
 
-        self.hvpsInst.set_voltage(0, wait=True)  # make sure we start at 0 V
-        self.hvpsInst.set_output_on()
-        self.hvpsInst.set_relay_auto_mode()  # enable auto mode by default
         self.hvpsInst.set_switching_mode(1)  # set to DC mode by default to make sure that the HV indicator LED works
+        self.hvpsInst.set_voltage(0, wait=True)  # make sure we start at 0 V
+        self.hvpsInst.set_relay_auto_mode()  # enable auto mode by default
 
         # set up state machine #############################################################
 
@@ -344,13 +354,12 @@ class NERD:
                 # -----------------------
                 # show images
                 # -----------------------
-                shape = (720, 405)
-                disp_imgs = [cv.resize(ImageCapture.ImageCapture.IMG_NOT_AVAILABLE, shape)] * 6
+                disp_imgs = [cv.resize(ImageCapture.ImageCapture.IMG_NOT_AVAILABLE, preview_image_size)] * 6
                 for i in range(6):
                     if len(res_imgs) > i and res_imgs[i] is not None:
-                        disp_imgs[i] = cv.resize(res_imgs[i], shape)
+                        disp_imgs[i] = cv.resize(res_imgs[i], preview_image_size)
 
-                sep = np.zeros((shape[1], 3, 3), dtype=np.uint8)
+                sep = np.zeros((preview_image_size[1], 3, 3), dtype=np.uint8)
                 row1 = np.concatenate((disp_imgs[0], sep, disp_imgs[1], sep, disp_imgs[2]), axis=1)
                 row2 = np.concatenate((disp_imgs[3], sep, disp_imgs[4], sep, disp_imgs[5]), axis=1)
                 sep = np.zeros((3, row1.shape[1], 3), dtype=np.uint8)
