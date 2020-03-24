@@ -267,8 +267,14 @@ def get_ellipse_mask(ellipse, img_shape, offset=0):
     """
     # create image
     mask = np.zeros((img_shape[0], img_shape[1]), dtype=np.uint8)
-    # draw ellipse
-    draw_ellipse(mask, ellipse, (255, 255, 255), -1)
+
+    try:
+        # fill ellipse
+        draw_ellipse(mask, ellipse, (255, 255, 255), -1)
+    except Exception as ex:
+        logging.getLogger("StrainDetection").warning("Unable to create ellipse mask: {}".format(ex))
+        mask += 255  # make mask white to include everything
+        return mask
 
     # dilate/erode by given offset, if necessary
     if offset != 0:
