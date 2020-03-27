@@ -2,4 +2,6 @@
 /output/
 /venv/
 /src/image_processing/camera test logs/
+/src/measurement/test_data/
 /config.txt
+*.mat
