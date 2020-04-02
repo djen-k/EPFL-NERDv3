@@ -159,13 +159,13 @@ class HVPS:
 
         return is_connected_wrapper
 
-    def auto_open(self):
+    def auto_open(self, with_continuous_reading=False):
         """Open first available HVPS"""
         self.detect()
         if self.hvps_available_ports:
-            self.current_device = self.open_hvps(self.hvps_available_ports[0])
+            self.current_device = self.open_hvps(self.hvps_available_ports[0], with_continuous_reading)
 
-    def open_hvps(self, info: HvpsInfo, with_continuous_reading=True):
+    def open_hvps(self, info: HvpsInfo, with_continuous_reading=False):
         """Establishes connection with the HVPS."""
         self.logging.debug("Connecting to %s" % info.port)
         self.serial_com_lock.acquire()
@@ -231,11 +231,11 @@ class HVPS:
             self.serial_com_lock.release()
         return self.current_device
 
-    def open_hvps_from_port(self, port):
+    def open_hvps_from_port(self, port, with_continuous_reading=False):
         """Open an HVPS from a specific COM Port"""
         info = HvpsInfo()
         info.port = port
-        self.open_hvps(info)
+        self.open_hvps(info, with_continuous_reading)
         return info
 
     def close(self):

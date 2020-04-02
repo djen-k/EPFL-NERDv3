@@ -13,7 +13,7 @@ from src.fileio.DataSaver import DataSaver
 from src.fileio.ImageSaver import ImageSaver
 from src.fileio.config import read_config, write_config
 from src.gui import SetupDialog, Screen
-from src.hvps import NERDHVPS
+from src.hvps.Switchboard import SwitchBoard
 from src.image_processing import ImageCapture, StrainDetection
 
 
@@ -102,7 +102,8 @@ class NERD:
 
         # connect to HVPS
         try:
-            self.hvpsInst = NERDHVPS.init_hvps(self.config["com_port"])
+            self.hvpsInst = SwitchBoard()
+            self.hvpsInst.open(self.config["com_port"])
         except Exception as ex:
             self.logging.critical("Unable to connect to HVPS: {}".format(ex))
             QMessageBox.critical(None, "Unable to connect to HVPS/Switchboard!",

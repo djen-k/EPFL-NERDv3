@@ -4,11 +4,11 @@ import os
 import time
 
 import cv2
-from PyQt5 import QtWidgets, QtSerialPort, QtGui
+from PyQt5 import QtWidgets, QtGui
 from PyQt5.QtCore import Qt
 
 from src.gui import QtImageTools, Screen
-from src.hvps import NERDHVPS
+from src.hvps.Switchboard import SwitchBoard
 from src.image_processing import ImageCapture, StrainDetection
 
 
@@ -44,7 +44,7 @@ class SetupDialog(QtWidgets.QDialog):
         self._strain_detector = None  # will be set when a reference is recorded
         self.n_cams = 0  # we don't know of any available cameras yet
 
-        self._hvps = None
+        self._hvps = SwitchBoard()
 
         # return values
         self._camorder = [-1] * n_deas
@@ -315,36 +315,43 @@ class SetupDialog(QtWidgets.QDialog):
         self.num_ac_frequency.setEnabled(self.chk_ac.isChecked())
 
     def refresh_comports(self):
+        self.cbb_port_name.blockSignals(True)  # block signals to avoid excessive reconnecting to the switchboard
         self.cbb_port_name.clear()  # remove all items
         # list all available com ports
-        comports = QtSerialPort.QSerialPortInfo().availablePorts()
-        portnames = [info.portName() for info in comports]
+        ports = self._hvps.detect()
+        display_names = ["{} ({})".format(p.name.decode("ASCII"), p.port) for p in ports]
+        port_names = [p.port for p in ports]
+        # comports = QtSerialPort.QSerialPortInfo().availablePorts()
+        # portnames = [info.portName() for info in comports]
         # comports = serial.tools.list_ports.comports()
         # portnames = comports[0].name
-        self.cbb_port_name.addItems(portnames)
+        self.cbb_port_name.addItems(display_names)
 
         # select the default COM port, if it is available
-        if "com_port" in self._defaults and self._defaults["com_port"] in portnames:
-            self.cbb_port_name.setCurrentText(self._defaults["com_port"])
-        else:  # no default or default not available --> pick last one
-            self.cbb_port_name.setCurrentIndex(len(comports) - 1)
+        if "com_port" in self._defaults and self._defaults["com_port"] in port_names:
+            idx = port_names.index(self._defaults["com_port"])
+            if idx != self.cbb_port_name.currentIndex():  # only set if the index is different to avoid reconnect
+                self.cbb_port_name.setCurrentIndex(idx)
+        # else:  # no default or default not available --> pick first one
+        #     self.cbb_port_name.setCurrentIndex(0)
+
+        self.cbb_port_name.blockSignals(False)  # turn signals back on
+        self.cbb_comport_changed()  # call comport changed once to connect to the newly selected com port
 
     def cbb_comport_changed(self):
-        if self._hvps is not None:
-            del self._hvps
+        # if self._hvps.is_open:
+        #     self.close()
 
         try:
-            port = self.cbb_port_name.currentText()
-            hvps = NERDHVPS.init_hvps(port)
-            self.lbl_switcbox_status.setText(hvps.get_name().decode("ASCII"))
-            self._hvps = hvps
+            port_idx = self.cbb_port_name.currentIndex()
+            self._hvps.open(port_idx)
+            self.lbl_switcbox_status.setText("Connected")
             self.btn_apply_voltage.setEnabled(True)
         except Exception as ex:
             self.logging.debug("Could not connect to switchboard: {}".format(ex))
-            self.lbl_switcbox_status.setText("nothing")
+            self.lbl_switcbox_status.setText("Connection failed!")
             self.btn_apply_voltage.setEnabled(False)
             self.btn_apply_voltage.setChecked(False)
-            self._hvps = None
 
     def btnAdjustClicked(self):
         self.logging.debug("clicked adjust")

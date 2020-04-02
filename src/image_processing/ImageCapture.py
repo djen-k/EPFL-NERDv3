@@ -7,6 +7,7 @@ import cv2 as cv
 import numpy as np
 
 from libs.duallog import duallog
+from src.image_processing import StrainDetection
 
 
 class Camera:
@@ -33,6 +34,12 @@ class Camera:
     def set_resolution(self, desired_resolution):
         self.cap.set(cv.CAP_PROP_FRAME_WIDTH, desired_resolution[0])
         self.cap.set(cv.CAP_PROP_FRAME_HEIGHT, desired_resolution[1])
+
+    def set_exposure(self, desired_exposure):
+        self.cap.set(cv.CAP_PROP_EXPOSURE, desired_exposure)
+
+    def get_auto_exposure(self):
+        print("not implemented yet")
 
     def grab(self):
         """
@@ -213,6 +220,24 @@ class ImageCapture:
                 self.logging.info("Changing name '{}' to '{}'".format(cam.name, names[i]))
                 cam.name = names[i]
             self._camera_names = names
+
+    def get_camera_property(self, cam_property):
+        return [cam.cap.get(cam_property) for cam in self._cameras]
+
+    def set_camera_property(self, cam_property, values):
+        """
+        Set the given property for all active cameras.
+        :param cam_property: The property to set (cv2.CAP_PROP_...)
+        :param values: The values to set. Can be a scalar or list of the same length as the number of cameras.
+        """
+        if np.isscalar(values):
+            values = [values] * self._camera_count
+        else:
+            if len(values) != self._camera_count:
+                raise ValueError("Values must be a scalar or list with the same length as the number of cameras!")
+
+        for cam, val in zip(self._cameras, values):
+            cam.cap.set(cam_property, val)
 
     def get_camera(self, cam_id):
         """
@@ -491,24 +516,121 @@ class ImageCapture:
             return False
         return self._capture_thread.is_alive()
 
+    def set_fixed_exposure(self):
+        """
+        Enable auto exposure on all selected cameras to find the best exposure, then sets these value as the fixed
+        exposure for each camera. Because openCV does not return the actual value when auto exposure is enabled,
+        the value needs to be found by trying different values and comparing the resulting images against a reference
+        image taken with auto exposure.
+        :return: The exposure of each camera, as determined by auto exposure.
+        """
+        # check if initialized
+        if self._camera_count == -1:  # not initialized yet  --> go find cameras
+            self.logging.info("ImageCapture not yet initialized. Initializing cameras...")
+            self.find_cameras()
+
+        self.logging.debug("Determining best exposure level using autp exposure...")
+
+        self.set_camera_property(cv.CAP_PROP_AUTO_EXPOSURE, 1)  # turn auto exposure on
+        time.sleep(3)  # wait for auto exposure to settle (at least 2.2 s!)
+        refs = self.read_images()  # record set of images with auto exposure
+        for i in range(len(refs)):
+            cv.imshow('Camera {} - press [q] to exit'.format(i), cv.resize(refs[i], (0, 0), fx=0.25, fy=0.25))
+        res = cv.waitKey(0)
+
+        self.set_camera_property(cv.CAP_PROP_AUTO_EXPOSURE, 0)  # turn auto exposure off
+        exposures = np.ones(self._camera_count) * -13
+        increment = np.ones(self._camera_count)
+        prev_deviation = np.ones(self._camera_count) * np.inf
+        while np.any(increment != 0):
+            exposures += increment
+            self.set_camera_property(cv.CAP_PROP_EXPOSURE, exposures)  # set fixed exposure
+            time.sleep(0.3)  # wait for cameras to apply settings (at least 200 ms!)
+            imgs = self.read_images()
+            new_deviation = np.array([StrainDetection.get_image_deviation(img, ref) for img, ref in zip(imgs, refs)])
+            self.logging.debug("Deviation: {}".format(new_deviation))
+            i_dev_inc = new_deviation > prev_deviation  # get cam indices where the deviation has started increasing
+            exposures[i_dev_inc] -= increment[i_dev_inc]  # undo increment to return to exposure with lowest deviation
+            increment[i_dev_inc] = 0  # stop incrementing if deviation has started increasing
+            increment[exposures == 0] = 0  # stop incrementing if the maximum exposure (0) is reached
+
+            prev_deviation = new_deviation
+
+        self.set_camera_property(cv.CAP_PROP_EXPOSURE, exposures)  # set best exposure
+        self.logging.debug("Exposure levels fixed at {}".format(exposures))
+        return exposures
+
     def run_test(self):
         res = 0
         # todo: implement proper resource management so files can be accessed consistently from anywhere
         no_img = cv.imread("../../res/images/no_image.png")
         waiting_img = cv.imread("../../res/images/waiting.jpeg")
-        cv.imshow('Camera 0', cv.resize(waiting_img, (0, 0), fx=0.5, fy=0.5))
+        cv.imshow('Camera 0', cv.resize(waiting_img, (0, 0), fx=1, fy=1))
 
-        while res & 0xFF != ord('q'):
+        self.find_cameras()
+        self.select_cameras([0])
+        origs = self.read_images()
+        cv.imshow('Camera 0', cv.resize(origs[0], (0, 0), fx=0.5, fy=0.5))
+        res = cv.waitKey(500)
 
+        cap0 = self.get_camera(0).cap
+        cap0.set(cv.CAP_PROP_AUTO_EXPOSURE, 1)
+        start = time.monotonic()
+        # time.sleep(2.5)  # wait for auto exposure to settle (at least 2.2 s!)
+        for i in range(50):
             imgs = self.read_images()
+            print("elapsed:", time.monotonic() - start)
+            print("dev:", StrainDetection.get_image_deviation(imgs[0], origs[0]))
+            cv.imshow('Camera 0', cv.resize(imgs[0], (0, 0), fx=0.5, fy=0.5))
+            res = cv.waitKey(10)
+        res = cv.waitKey(0)
+        origs = self.read_images()
+        cap0.set(cv.CAP_PROP_AUTO_EXPOSURE, 0)
+        # time.sleep(2.5)  # wait for auto exposure to settle (at least 2.2 s!)
+        for i in range(50):
+            imgs = self.read_images()
+            print("elapsed:", time.monotonic() - start)
+            print("dev:", StrainDetection.get_image_deviation(imgs[0], origs[0]))
+            cv.imshow('Camera 0', cv.resize(imgs[0], (0, 0), fx=0.5, fy=0.5))
+            res = cv.waitKey(10)
+        res = cv.waitKey(0)
+        exposure = 1
+        mindev = np.inf
+        minexp = 0
+        while exposure > -13:
+            print("set exposure to", exposure)
+            exposure -= 1
+            cap0.set(cv.CAP_PROP_EXPOSURE, exposure)
+            print("exposure:", cap0.get(cv.CAP_PROP_EXPOSURE))
+            print("auto wb:", cap0.get(cv.CAP_PROP_AUTO_WB))
+            print("wb temp:", cap0.get(cv.CAP_PROP_WB_TEMPERATURE))
+            print("brightness:", cap0.get(cv.CAP_PROP_BRIGHTNESS))
+            time.sleep(0.3)  # wait for camera to apply settings (at least 200 ms!)
+            dev = 0
+            for i in range(5):
+                imgs = self.read_images()
+                dev = StrainDetection.get_image_deviation(origs[0], imgs[0])
+                print(dev)
+                cv.imshow('Camera 0', cv.resize(imgs[0], (0, 0), fx=0.5, fy=0.5))
+                res = cv.waitKey(1)
 
-            for i in range(len(imgs)):
-                if imgs[i] is None:
-                    cv.imshow('Camera {}'.format(i), cv.resize(no_img, (0, 0), fx=0.5, fy=0.5))
-                else:
-                    cv.imshow('Camera {}'.format(i), cv.resize(imgs[i], (0, 0), fx=0.25, fy=0.25))
+            print("Deviation:", dev)
+            if dev < mindev:
+                mindev = dev
+                minexp = exposure
 
+        print("Done!")
+        print("set exposure to", minexp)
+        cap0.set(cv.CAP_PROP_EXPOSURE, minexp)
+        imgs = self.read_images()
+
+        for i in range(5):  # len(imgs)):
+            imgs = self.read_images()
+            cv.imshow('Camera 0', cv.resize(imgs[0], (0, 0), fx=0.5, fy=0.5))
             res = cv.waitKey(500)
+
+        cap0.set(cv.CAP_PROP_EXPOSURE, 0)
+        res = cv.waitKey(0)
 
 
 class ImageCaptureThread(Thread):
@@ -543,4 +665,22 @@ SharedInstance = ImageCapture()
 if __name__ == '__main__':
     duallog.setup("camera test logs", minlevelConsole=logging.DEBUG, minLevelFile=logging.DEBUG)
     logging.info("Testing image capture")
-    SharedInstance.run_test()
+
+    cap = SharedInstance
+    cap.find_cameras()
+    cap.select_cameras([0, 2])
+
+    cap.set_camera_property(cv.CAP_PROP_AUTO_EXPOSURE, 0)
+    cap.set_camera_property(cv.CAP_PROP_EXPOSURE, 0)
+    time.sleep(0.3)
+
+    cap.set_camera_property(cv.CAP_PROP_XI_AUTO_WB, 0)
+
+    print("exposure:", cap.set_fixed_exposure())
+    time.sleep(0.5)
+    res = 0
+    while res != ord('q'):
+        _imgs = cap.read_images()
+        for i in range(len(_imgs)):
+            cv.imshow('Camera {} - press [q] to exit'.format(i), cv.resize(_imgs[i], (0, 0), fx=0.25, fy=0.25))
+        res = cv.waitKey(100)

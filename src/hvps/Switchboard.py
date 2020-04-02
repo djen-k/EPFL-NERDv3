@@ -19,6 +19,56 @@ class SwitchBoard(HVPS):
 
         super().__del__()
 
+    def open(self, com_port=None, with_continuous_reading=False):
+        """
+        Open a connection to a physical switchboard at the given COM port. The port can be specified as a string
+        (COM port name), a HvpsInvo object or an index. If specified as an index, the respective port in this
+        SwitchBoard's hvps_available_ports list is used. If no port is specified, the first available port is used.
+        :param com_port: The COM port to connect to. Can be a string, HvpsInfo, int or None
+        :param with_continuous_reading: Specify if the SwitchBoard should launch a thread to record continuous voltage
+        readings
+        """
+        if self.is_open:
+            self.close()
+
+        # connect to HVPS
+        if com_port is None:  # if not defined, autodetect HVPS
+            self.auto_open(with_continuous_reading)
+        elif isinstance(com_port, HvpsInfo):  # specified as HvpsInfo  -> open
+            self.open_hvps(com_port, with_continuous_reading)
+        elif isinstance(com_port, str):  # specified as port name (string)  -> open by name
+            self.open_hvps_from_port(com_port, with_continuous_reading)
+        elif isinstance(com_port, int):  # specified as index  -> pick from list of available ports
+            self.open_hvps(self.hvps_available_ports[com_port], with_continuous_reading)
+        else:
+            raise ValueError("Invalid argument! COM port must be given as string, index, or HvpsInfo object!")
+
+        if self.is_open:  # get HVPS name and print success message
+            name = self.get_name()
+            logging.info("connected successfully to {} on {}".format(name.decode(), self.ser.port))
+        else:  # you had one job: giving the correct COM port, and you failed!
+            logging.critical("Unable to connect to HVPS, ensure it's connected")
+            # raise Exception
+
+        # ensure we have a compatible HVPS, correctly connected and configured
+        hvps_type = (self.get_hvps_type() == "slave")  # until when is the term "slave" politically correct ?
+        jack = (self.get_jack_status() == 1)  # external power connector, not your friend Jack
+        control_mode = (self.get_voltage_control_mode() == 0)
+        if not (hvps_type and jack and control_mode):
+            logging.critical("either type, power source or control mode is not correctly set, ...")
+            # raise Exception
+
+        # ensure firmware version is compatible
+        version = self.get_firmware_version()
+        if version != 7:
+            logging.critical("HVPS firmware version is: {}. Only tested with version 7".format(version))
+
+        # select DC and output OFF
+        self.set_switching_source(0)
+        self.set_switching_mode(1)
+        self.set_output_off()
+        self.set_voltage(0)
+
     def close(self):
         """Closes connection with the HVPS"""
         self.stop_voltage_reading()

@@ -6,9 +6,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import scipy.io as sio
 import visa
-from PyQt5 import QtSerialPort
 
-from src.hvps import NERDHVPS
+from src.hvps.Switchboard import SwitchBoard
 
 
 def list_instruments(instrument_search_string=None, resource_manager=None):
@@ -304,16 +303,14 @@ def test_digitize_current():
     daq.get_instrument_name()
     daq.set_data_format('f')
 
-    comports = QtSerialPort.QSerialPortInfo().availablePorts()
-    portnames = [info.portName() for info in comports]
-    port = portnames[-1]
-    hvps = NERDHVPS.init_hvps(port)
+    hvps = SwitchBoard()
+    hvps.open()
     print("Connected to HVPS", hvps.get_name())
-    print("Relays on:", hvps.set_relay_state(2, True))
+    print("Relays on:", hvps.set_relays_on([2]))
     hvps.set_voltage(0)
     hvps.set_switching_mode(1)
 
-    t = 1  # measurement duration 1s
+    t = 2  # measurement duration 1s
     count = 1000000 * t  # 1 MHz sample rate
     buffer = "'curDigBuffer'"
 
@@ -346,9 +343,9 @@ def test_digitize_current():
     # time.sleep(count/srate + 1)  # wait for the time it will take to record the data (plus a bit, just to be safe)
     start = time.monotonic()
 
-    time.sleep(0.1 * t)
-    hvps.set_voltage(1000)
-    time.sleep(0.45 * t)
+    time.sleep(0.1)
+    hvps.set_voltage(800)
+    time.sleep(0.45)
     hvps.set_voltage(0)
 
     i = 0
@@ -382,6 +379,83 @@ def test_digitize_current():
     plt.show()
 
 
+def test_digitize_voltage():
+    daq = DAQ6510()
+    # daq.set_timeout(10)
+    daq.get_instrument_name()
+    daq.set_data_format('f')
+
+    hvps = SwitchBoard()
+    hvps.open()
+    print("Connected to HVPS", hvps.get_name())
+    print("Relays on:", hvps.set_relays_on([0]))
+    hvps.set_voltage(0)
+    hvps.set_switching_mode(0)
+
+    t = 3  # measurement duration 1s
+    count = 1000000 * t  # 1 MHz sample rate
+    buffer = "'curDigBuffer'"
+
+    daq.send_command("TRACe:MAKE {}, {}".format(buffer, count))  # create buffer of correct size to store the data
+
+    daq.send_command("DIG:FUNC 'VOLT'")  # select digitize current
+    daq.send_command("DIG:VOLT:RANG 1000")  # set measurement range to 100 µA (smallest range)
+    daq.send_command("DIG:VOLT:SRAT MAX")  # set sample rate to max (1MHz)
+    daq.send_command("DIG:VOLT:APER AUTO")  # set aperture to auto (will be 1µs @ 1MHz)
+    daq.send_command("DIG:COUN {}".format(count))  # set number of measurements to 7,000,000 (max at 1 MHz)
+    daq.send_command(":TRIGger:BLOCk:MDIGitize 1, {}, AUTO".format(buffer))  # configure a trigger (just single shot)
+
+    srate = float(daq.send_query("DIG:VOLT:SRAT?"))
+    print("Sample rate:", srate, "Hz")
+    irange = float(daq.send_query("DIG:VOLT:RANGe?"))
+    unit = daq.send_query("DIG:VOLT:UNIT?")
+    print("Input range:", irange, unit)
+    daq_count = float(daq.send_query("DIG:COUN?"))
+    if count != daq_count:
+        raise Exception("Count is not what it is supposed to be")
+    print("Format:", daq.send_query("FORM?"))
+
+    # start digitize measurement
+    daq.send_command("INIT")
+    # time.sleep(count/srate + 1)  # wait for the time it will take to record the data (plus a bit, just to be safe)
+    start = time.monotonic()
+
+    time.sleep(0.1)
+    hvps.set_voltage(500)
+    time.sleep(2.6)
+    hvps.set_voltage(0)
+
+    i = 0
+    while i < count:
+        time.sleep(0.3)
+        i = int(daq.send_query("TRACe:ACTual? {}".format(buffer)))
+        print(i)
+    stop = time.monotonic()
+    print("Time until data is available:", stop - start)
+    # retrieve data
+    start = time.monotonic()
+    data = daq.query_data("TRACe:DATA? 1, {}, {}, REL, READ".format(count, buffer), 2 * count)
+    data = data.reshape((-1, 2)) * [1000, 1]  # shape into two columns and convert to ms and µA
+    # reltime = daq.query_data("TRACe:DATA? 1, {}, {}, REL".format(count, buffer))
+    stop = time.monotonic()
+    print("Time to retrieve data:", stop - start)
+
+    daq.send_command("ROUT:OPEN (@112)")  # open relays again to switch 9.5V back on
+    daq.send_command("ROUT:OPEN (@113)")
+    hvps.set_relays_off()
+
+    np.set_printoptions(formatter={'float': '{: 0.3f}'.format}, linewidth=500)  # set print format for arrays
+    print(data[[0, 1, 2, -3, -2, -1], :])
+
+    mat = {"t": data[:, 0], "V": data[:, 1]}
+    sio.savemat('test_data/VD_test_{}.mat'.format(datetime.now().strftime("%Y%m%d-%H%M%S")), mat)
+
+    plt.plot(data[:, 0], data[:, 1])
+    plt.xlabel("Time [ms]")
+    plt.ylabel("Voltage [V]")
+    plt.show()
+
+
 if __name__ == '__main__':
     # nplcs = [12, 1, 0.0005]
     # n_meas = [10, 135, 440]
@@ -391,3 +465,4 @@ if __name__ == '__main__':
     # test_current_measurements()
     # measure_resistance_sequence()
     test_digitize_current()
+    # test_digitize_voltage()
