@@ -12,7 +12,7 @@ class SwitchBoard(HVPS):
 
     def __del__(self):
         try:
-            self.set_voltage(0, wait=True)
+            self.set_voltage(0, block_if_testing=True)
             self.set_relays_off()
         except Exception as ex:
             self.logging.warning("Unable to switch off the relays: {}".format(ex))
@@ -60,7 +60,7 @@ class SwitchBoard(HVPS):
 
         # ensure firmware version is compatible
         version = self.get_firmware_version()
-        if version != 7:
+        if version != 1:
             logging.critical("HVPS firmware version is: {}. Only tested with version 7".format(version))
 
         # select DC and output OFF
@@ -75,7 +75,7 @@ class SwitchBoard(HVPS):
         time.sleep(0.1)
         self.serial_com_lock.acquire()
         if self.ser.is_open:
-            self.set_voltage(0, wait=True)  # set the voltage to 0 as a safety measure
+            self.set_voltage(0, block_if_testing=True)  # set the voltage to 0 as a safety measure
             self.set_relays_off()
             self.ser.close()
         self.is_open = False
@@ -108,19 +108,21 @@ class SwitchBoard(HVPS):
         res = self._parse_relay_state(self._read_hvps())
         return res
 
-    def set_voltage(self, voltage, wait=False):  # sets the output voltage
+    def set_voltage(self, voltage, block_if_testing=False):  # sets the output voltage
         """
         Sets the output voltage.
         Checks if voltage can be set or if switchboard is currently testing for a short circuit
         :param voltage: The desired output voltage
-        :param wait: Flag to indicate if the function should block until the voltage can be set. If false, the function
+        :param block_if_testing: Flag to indicate if the function should block until the voltage can be set. The voltage
+        set point cannot be changed while the switchboard is testing for short circuits. Set this to True, if you want
+        the function to block until the switchboard has finished testing (if it was). If false, the function
         may return without having set the voltage. Check response from switchboard!
         :return: True if the voltage was set successfuly, false if the switchboard was unable to set the voltage because
-        it was busy testing for a short circuit or some other error occurred. If 'wait' is true, a False return value
-        indicates an unexpected error.
+        it was busy testing for a short circuit or some other error occurred. If 'block_if_testing' is True,
+        a False return value indicates an unexpected error.
         """
 
-        if wait:
+        if block_if_testing:
             while self.is_testing():
                 self.logging.debug("Switchboard is busy testing for shorts. Waiting to set voltage...")
                 time.sleep(0.1)
@@ -211,23 +213,65 @@ class SwitchBoard(HVPS):
         else:
             self.logging.critical("Failed to reconnect!")
 
+    def get_pid_gains(self):
+        """
+        Query the PID gains of the internal voltage regulator.
+        :return: A list of gain values [P, I, D]
+        """
+        self._write_hvps(b'QKp\r')
+        res = self._read_hvps()  # read response
+        res = res.decode("utf-8")
+        res = res.split(",")
+        res = [float(s) for s in res]
+        return res
+
+    def set_pid_gains(self, gains):
+        """
+        Set the PID gains of the internal voltage regulator. The new gains will be written to the EEPROM.
+        :param gains: A list of gain values [P, I, D]
+        :return: The updated PID gains [P, I, D]
+        """
+        self.set_pid_gain('p', gains[0])
+        self.set_pid_gain('i', gains[1])
+        res = self.set_pid_gain('d', gains[2])
+        return res
+
+    def set_pid_gain(self, param, gain):
+        """
+        Set the specified gain of the internal voltage regulator. The new gains will be written to the EEPROM.
+        :param param: The parameter to set (P, I, or D) as a single-character string (case is ignored)
+        :param gain: The value to which to set the specified gain.
+        :return: The updated PID gains [P, I, D]
+        """
+        param = str(param)
+        param = param.lower()
+        if param not in "pid" or len(param) > 1:
+            raise ValueError("Parameter must be either 'p', 'i', or 'd'!")
+        param = bytes(param, 'utf-8')
+        self._write_hvps(b'SK%b %.4f\r' % (param, gain))
+        self._read_hvps()  # read response to clear buffer
+        res = self.get_pid_gains()  # query again because the return value of the write command has too few digits
+        return res
+
 
 if __name__ == '__main__':
     sb = SwitchBoard()
-    hvpsInfo = HvpsInfo()
-    comPort = "COM8"
-    hvpsInfo.port = comPort
-    sb.open_hvps(hvpsInfo, with_continuous_reading=False)
-
+    sb.open(with_continuous_reading=True)
+    Vset = 1000
     print(sb.get_name())
-    print("sp: ", sb.get_voltage_setpoint())
-    print("now: ", sb.get_current_voltage())
+    # print("sp: ", sb.get_voltage_setpoint())
+    # print("now: ", sb.get_current_voltage())
     # print("set: ", sb.set_voltage(500))
     # print("sp: ", sb.get_voltage_setpoint())
     # time.sleep(2)
     # print("now: ", sb.get_current_voltage())
     # print(sb.set_relays_on())
     # print(sb.get_relay_state())
+    # gains = sb.set_pid_gains((0.32, 1.7, 0.005))
+    gains = sb.get_pid_gains()
+    print("PID gains:", gains)
+
+    sb.set_output_off()  # = set_switching_mode(0)
     print(sb.set_relay_auto_mode())
     # time.sleep(1)
     # print(sb.get_relay_state())
@@ -236,24 +280,50 @@ if __name__ == '__main__':
     # print(sb.set_relay_state(3, 1))
     # time.sleep(1)
     # print(sb.set_relays_off())
-    time.sleep(1)
-    print("set: ", sb.set_voltage(300))
-    print("sp: ", sb.get_voltage_setpoint())
+    # time.sleep(1)
+    sb.set_output_on()
+    # print("set1: ", sb.set_voltage(700))
+    # time.sleep(0.1)
+    # print("set2: ", sb.set_voltage(800))
+    # time.sleep(0.1)
+    # print("set3: ", sb.set_voltage(900))
+    # time.sleep(0.1)
+    print("set4: ", sb.set_voltage(Vset))
+    # print("sp: ", sb.get_voltage_setpoint())
+    # sb.set_frequency(1)
+    # print("f: ", sb.get_frequency())
+    # sb.start_ac_mode()  # = set_switching_mode(2)
     # time.sleep(2)
     # print("now: ", sb.get_current_voltage())
     # print("sp: ", sb.get_voltage_setpoint())
-    time.sleep(1)
-    print("now: ", sb.get_current_voltage())
-    print(sb.get_relay_state())
     time.sleep(2)
-    print(sb.set_relays_off())
-    time.sleep(1)
+    # print("now: ", sb.get_current_voltage())
+    # print(sb.get_relay_state())
+    # time.sleep(2)
+    # print(sb.set_relays_off())
+    # time.sleep(1)
     print("set: ", sb.set_voltage(0))
     print("sp: ", sb.get_voltage_setpoint())
-    time.sleep(1)
-    print("now: ", sb.get_current_voltage())
-    print("sp: ", sb.get_voltage_setpoint())
+    time.sleep(1.5)
+    # print("now: ", sb.get_current_voltage())
+    # print("sp: ", sb.get_voltage_setpoint())
+    sb.set_output_off()
     sb.close()
+
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    it = sb.times > 0
+    t = sb.times[it]
+    V = sb.voltage[it]
+    plt.plot(t, np.array(V) * 0 + Vset)
+    plt.plot(t, V)
+    plt.xlabel("Time [s]")
+    plt.ylabel("Voltage [V]")
+    title = "Hermione PID {} {}V 3-DEAs".format(str(gains), Vset)
+    plt.title(title)
+    plt.savefig("test_data/pid/" + title + ".png")
+    plt.show()
 
     # ---------- this breaks the switchboard firmware - no longer responds to voltage commands ---------
     # print(sb.get_name())

@@ -85,7 +85,7 @@ class SetupDialog(QtWidgets.QDialog):
         formLay.addRow("", self.btn_refresh_com)
 
         # create voltage selector
-        self.num_voltage = self.create_num_selector(300, 5000, "voltage", 1000)
+        self.num_voltage = self.create_num_selector(50, 5000, "voltage", 1000)
         formLay.addRow("Voltage [V]:", self.num_voltage)
 
         # toggle button to apply voltage (to check strain detection results)
@@ -105,6 +105,7 @@ class SetupDialog(QtWidgets.QDialog):
 
         # create high duration selector
         self.num_high_duration = self.create_num_selector(0, 100000, "high_duration_min", 60)
+        self.num_high_duration.valueChanged.connect(self.updateCycles)
         formLay.addRow("High duration (min):", self.num_high_duration)
 
         # create low duration selector
@@ -124,9 +125,14 @@ class SetupDialog(QtWidgets.QDialog):
         self.chk_ac.clicked.connect(self.chkACClicked)
         formLay.addRow("", self.chk_ac)
 
-        # create image save period selector
-        self.num_ac_frequency = self.create_num_selector(0, 1000, "ac_frequency", 50)
+        # create AC frequency selector
+        self.num_ac_frequency = self.create_num_selector(1, 1000, "ac_frequency", 50)
+        self.num_ac_frequency.valueChanged.connect(self.updateCycles)
         formLay.addRow("Switching frequency [Hz]:", self.num_ac_frequency)
+
+        # create number of cycles indicator
+        self.lbl_cycles = QtWidgets.QLabel("")
+        formLay.addRow("", self.lbl_cycles)
 
         # apply default to AC checkbox and enable or disable frequency selector accordingly
         if "AC_mode" in self._defaults:
@@ -134,8 +140,8 @@ class SetupDialog(QtWidgets.QDialog):
         else:
             checked = False
         self.chk_ac.setChecked(checked)
-        self.chk_ac.setEnabled(False)  # TODO: re-enable once AC mode is implemented
         self.num_ac_frequency.setEnabled(checked)
+        self.updateCycles()
 
         # create grid layout to show all the images
         gridLay = QtWidgets.QGridLayout()
@@ -295,6 +301,13 @@ class SetupDialog(QtWidgets.QDialog):
 
         return num
 
+    def updateCycles(self):
+        if self.chk_ac.isChecked():
+            n_cycles = self.num_high_duration.value() * 60 * self.num_ac_frequency.value()
+            self.lbl_cycles.setText("{:,} cycles per high-phase".format(n_cycles))
+        else:
+            self.lbl_cycles.setText("")
+
     def btnStartClicked(self):
         # only proceed if a strain reference has been set
         if self._strain_detector is None:
@@ -313,6 +326,7 @@ class SetupDialog(QtWidgets.QDialog):
 
     def chkACClicked(self):
         self.num_ac_frequency.setEnabled(self.chk_ac.isChecked())
+        self.updateCycles()
 
     def refresh_comports(self):
         self.cbb_port_name.blockSignals(True)  # block signals to avoid excessive reconnecting to the switchboard
@@ -418,14 +432,14 @@ class SetupDialog(QtWidgets.QDialog):
         if self._hvps is not None:
             if self.btn_apply_voltage.isChecked():
                 # turn on and set voltage
-                # TODO: turn switch mode back on once the opto-couplers work correctly
-                self._hvps.set_switching_mode(1)  # set to DC mode to make sure that the HV indicator LED works
+                self._hvps.set_switching_mode(1)  # set to DC mode
                 self._hvps.set_relay_auto_mode()
-                self._hvps.set_voltage(self.num_voltage.value(), wait=True)
+                self._hvps.set_voltage(self.num_voltage.value(), block_if_testing=True)
                 self.btn_apply_voltage.setText("Turn voltage off!")
                 self.btn_apply_voltage.setStyleSheet("QPushButton{ color: red }")
             else:
-                self._hvps.set_voltage(0, wait=True)
+                self._hvps.set_switching_mode(0)
+                self._hvps.set_voltage(0, block_if_testing=True)
                 self._hvps.set_relays_off()
                 self.btn_apply_voltage.setText("Apply voltage now!")
                 self.btn_apply_voltage.setStyleSheet("QPushButton{ color: black }")

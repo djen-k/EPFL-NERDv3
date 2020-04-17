@@ -213,13 +213,21 @@ def test_resistance_measurements(n_measurements=10, nplc=1):
 
 
 def test_current_measurements():
+    hvps = SwitchBoard()
+    hvps.open()
+    print("Connected to HVPS", hvps.get_name())
+    print("Relays on:", hvps.set_relays_on([0]))
+    hvps.set_voltage(0)
+    hvps.set_switching_mode(0)
+
     daq = DAQ6510()
     # daq.set_timeout(0.01)
     daq.get_instrument_name()
 
     daq.send_command("*RST")
     daq.send_command("SENS:FUNC 'CURR:DC', (@122)")
-    daq.send_command("SENS:CURR:DC:APERture 0.1, (@122)")
+    daq.send_command("SENS:CURR:DC:APERture 0.02, (@122)")
+    daq.send_command("SENS:CURR:DC:RANGe 100e-6, (@122)")
     daq.send_query("SENS:CURR:DC:APERture? (@122)")
     # daq.send_command("SENS:COUNt 10")
 
@@ -229,16 +237,97 @@ def test_current_measurements():
     time.sleep(0.5)
 
     # perform a series of measurements
-    n_measurements = 100
-    cur = [float(daq.send_query("READ?")) for i in range(n_measurements)]
+    Vtest = 1000
+    n = [15, 80, 100]
+    settling_delay = 10
+    # sw_mode = "OC"
+    sw_mode = "DCDC"
+
+    cur = []
+    V = []
+    Vset = []
+    t = []
+    ntotal = np.sum(n)
+
+    if sw_mode == "OC":
+        hvps.set_voltage(Vtest)  # ramp up voltage but OC remains off
+    elif sw_mode == "DCDC":
+        hvps.set_switching_mode(1)  # open OC but leave voltage 0
+    for i in range(n[0]):
+        cur.append(float(daq.send_query("READ?")))
+        V.append(hvps.get_current_voltage())
+        Vset.append(0)
+        t.append(time.monotonic())
+        print("{:.1f} %".format(i / ntotal * 100))
+
+    if sw_mode == "OC":
+        hvps.set_switching_mode(1)  # open OC to apply Vtest to DEAs
+    elif sw_mode == "DCDC":
+        hvps.set_voltage(Vtest)  # ramp up voltage to Vtest
+    for i in range(n[1]):
+        cur.append(float(daq.send_query("READ?")))
+        V.append(hvps.get_current_voltage())
+        Vset.append(Vtest)
+        t.append(time.monotonic())
+        print("{:.1f} %".format((n[0] + i) / ntotal * 100))
+
+    if sw_mode == "OC":
+        hvps.set_switching_mode(0)  # close OC to discharge DEAs
+    elif sw_mode == "DCDC":
+        hvps.set_voltage(0)  # reduce voltage to 0
+    for i in range(n[2]):
+        cur.append(float(daq.send_query("READ?")))
+        V.append(hvps.get_current_voltage())
+        Vset.append(0)
+        t.append(time.monotonic())
+        print("{:.1f} %".format((n[0] + n[1] + i) / ntotal * 100))
 
     daq.send_command("ROUT:OPEN (@112)")  # open relays again to switch 9.5V back on
     daq.send_command("ROUT:OPEN (@113)")
 
+    hvps.set_voltage(0)
+    hvps.set_switching_mode(0)
+    hvps.set_relays_off()
+    hvps.close()
+
     np.set_printoptions(formatter={'float': '{: 0.3f}'.format}, linewidth=500)  # set print format for arrays
-    cur = np.array(cur).reshape((-1, 1))
-    print("Current [nA]:")
-    print(cur * 1000000000)
+    cur = np.array(cur)  # .reshape((-1, 1))
+    cur = cur * 1000000000  # to nA
+    V = np.array(V)  # .reshape((-1, 1))
+    Vset = np.array(Vset)  # .reshape((-1, 1))
+    t = np.array(t)  # .reshape((-1, 1))
+    t = t - t[0]
+
+    print("Leakage current [nA]:")
+    istart = 0 + settling_delay
+    iend = n[0]
+    print("V off ({:.2f} to {:.2f}): {:.5f}".format(t[istart], t[iend - 1], np.mean(cur[istart:iend])))
+    istart = n[0] + settling_delay
+    iend = n[0] + n[1]
+    print("V on ({:.2f} to {:.2f}): {:.5f}".format(t[istart], t[iend - 1], np.mean(cur[istart:iend])))
+    istart = n[0] + n[1] + settling_delay
+    iend = n[0] + n[1] + n[2]
+    print("V off ({:.2f} to {:.2f}): {:.5f}".format(t[istart], t[iend - 1], np.mean(cur[istart:iend])))
+
+    fig, ax1 = plt.subplots()
+
+    color = 'tab:red'
+    ax1.set_xlabel('Time (s)')
+    ax1.set_ylabel('Current [nA]', color=color)
+    ax1.plot(t, cur, color=color)
+    ax1.tick_params(axis='y', labelcolor=color)
+    ax1.grid(True)
+
+    ax2 = ax1.twinx()  # instantiate a second axes that shares the same x-axis
+
+    color = 'tab:blue'
+    ax2.set_ylabel('Voltage [V]', color=color)  # we already handled the x-label with ax1
+    # ax2.plot(t, Vset, color="k")
+    ax2.plot(t, V, color=color)
+    ax2.tick_params(axis='y', labelcolor=color)
+
+    fig.tight_layout()  # otherwise the right y-label is slightly clipped
+    plt.show()
 
 
 def measure_resistance_sequence():
@@ -306,12 +395,18 @@ def test_digitize_current():
     hvps = SwitchBoard()
     hvps.open()
     print("Connected to HVPS", hvps.get_name())
-    print("Relays on:", hvps.set_relays_on([2]))
+    print("Relays on:", hvps.set_relays_on())
     hvps.set_voltage(0)
-    hvps.set_switching_mode(1)
+    hvps.set_switching_mode(0)
 
-    t = 2  # measurement duration 1s
-    count = 1000000 * t  # 1 MHz sample rate
+    t = 3  # measurement duration in sec
+    sample_rate = 100000  # 1000000
+    Vtest = 1000
+    # sw_mode = "OC"
+    sw_mode = "DCDC"
+
+    count = sample_rate * t  # 1 MHz sample rate
+
     buffer = "'curDigBuffer'"
 
     # daq.send_command("TRACe:POINts 10, 'defbuffer1'")  # reduce size of default buffers to 10 (minimum)
@@ -320,13 +415,15 @@ def test_digitize_current():
 
     daq.send_command("DIG:FUNC 'CURR'")  # select digitize current
     daq.send_command("DIG:CURR:RANG 100e-6")  # set measurement range to 100 µA (smallest range)
-    daq.send_command("DIG:CURR:SRAT MAX")  # set sample rate to max (1MHz)
+    daq.send_command("DIG:CURR:SRAT {}".format(sample_rate))  # set sample rate to max (1MHz)
     daq.send_command("DIG:CURR:APER AUTO")  # set aperture to auto (will be 1µs @ 1MHz)
-    daq.send_command("DIG:COUN {}".format(count))  # set number of measurements to 7,000,000 (max at 1 MHz)
+    daq.send_command("DIG:COUN {}".format(count))  # set number of measurements (theoretical max 7,000,000 at 1 MHz)
     daq.send_command(":TRIGger:BLOCk:MDIGitize 1, {}, AUTO".format(buffer))  # configure a trigger (just single shot)
 
     srate = float(daq.send_query("DIG:CURR:SRAT?"))
     print("Sample rate:", srate, "Hz")
+    aper = daq.send_query("DIG:CURR:APER?")
+    print("Aperture:", aper)
     daq_count = float(daq.send_query("DIG:COUN?"))
     if count != daq_count:
         raise Exception("Count is not what it is supposed to be")
@@ -335,22 +432,34 @@ def test_digitize_current():
     daq.send_command("ROUT:CLOSe (@122)")  # close relays on current measurement channel
     daq.send_command("ROUT:CLOSe (@112)")  # close relays to switch off 9.5V power used for R measurements
     daq.send_command("ROUT:CLOSe (@113)")
-    time.sleep(0.1)
+    time.sleep(0.5)
 
     # perform a digitize measurement
     # daq.send_query("READ:DIG? 'curDigBuffer'")
-    daq.send_command("INIT")
     # time.sleep(count/srate + 1)  # wait for the time it will take to record the data (plus a bit, just to be safe)
+    daq.send_command("INIT")
     start = time.monotonic()
 
-    time.sleep(0.1)
-    hvps.set_voltage(800)
-    time.sleep(0.45)
-    hvps.set_voltage(0)
+    if sw_mode == "OC":
+        hvps.set_voltage(Vtest)  # ramp up voltage but OC remains off
+    elif sw_mode == "DCDC":
+        hvps.set_switching_mode(1)  # open OC but leave voltage 0
+    time.sleep(0.1 * t)
+
+    if sw_mode == "OC":
+        hvps.set_switching_mode(1)  # open OC to apply Vtest to DEAs
+    elif sw_mode == "DCDC":
+        hvps.set_voltage(Vtest)  # ramp up voltage to Vtest
+    time.sleep(0.5 * t)
+
+    if sw_mode == "OC":
+        hvps.set_switching_mode(0)  # close OC to discharge DEAs
+    elif sw_mode == "DCDC":
+        hvps.set_voltage(0)  # reduce voltage to 0
 
     i = 0
     while i < count:
-        time.sleep(0.3)
+        time.sleep(0.5)
         i = int(daq.send_query("TRACe:ACTual? {}".format(buffer)))
         print(i)
     stop = time.monotonic()
@@ -371,7 +480,7 @@ def test_digitize_current():
     print(data[[0, 1, 2, -3, -2, -1], :])
 
     mat = {"t": data[:, 0], "I": data[:, 1]}
-    sio.savemat('test_data/PD_test_{}.mat'.format(datetime.now().strftime("%Y%m%d-%H%M%S")), mat)
+    sio.savemat('test_data/leakage_test_{}.mat'.format(datetime.now().strftime("%Y%m%d-%H%M%S")), mat)
 
     plt.plot(data[:, 0], data[:, 1])
     plt.xlabel("Time [ms]")
@@ -462,7 +571,7 @@ if __name__ == '__main__':
     # for n_m, n_plc in zip(n_meas, nplcs):
     #     test_resistance_measurements(n_m, n_plc)
 
-    # test_current_measurements()
+    test_current_measurements()
     # measure_resistance_sequence()
-    test_digitize_current()
+    # test_digitize_current()
     # test_digitize_voltage()
