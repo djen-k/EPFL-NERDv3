@@ -26,7 +26,17 @@ def list_instruments(instrument_search_string=None, resource_manager=None):
     return selection
 
 
+def get_resistance_channels(deas):
+    """
+    Get the list of channels on the DAQ6510 that correspond to the given DEAs
+    :param deas: A list of indices of the DEAs to measure (in range 0 to 5)
+    :return: A list of DAQ channels, as a comma-separated string
+    """
+    return ",".join([DAQ6510.resistance_channels[dea] for dea in deas])
+
+
 class DAQ6510:
+    resistance_channels = ["103,104", "105,106", "107,108", "109,110", "117,118", "119,120"]
 
     def __init__(self, instrument_id=None, instrument_search_string="6510"):
         self.logging = logging.getLogger("DAQ6510")
@@ -134,82 +144,93 @@ class DAQ6510:
         else:
             return self.instrument.query_ascii_values(command, container=np.array)
 
+    def get_resistance_measurement(self, deas, n_measurements=1, aperture=0.1, nplc=None):
+        """
+        Measure 4-point electrode ersistance on the specified channels.
+        :param deas: A list of indices of the DEAs to measure (in range 0 to 5)
+        :param n_measurements: The number of measurements to take. If more than 1, the results will be averaged.
+        :param aperture: The aperture (duration) of each individual measurement in seconds. If defined, this takes
+        precedence over nplc.
+        :param nplc: The duration of each individual measurement in number of power line cycles (PLCs).
+        Set aperture to None in order to use nplc instead. Otherwise apreture takes precedence.
+        :return: A list of resistance values (one for each DEA)
+        """
+        n_deas = len(deas)
+        if n_deas == 0:
+            self.logging.warning("Reasistance measurement requested without any DEAs specified. Nothing is returned.")
+            return []
 
-def test_resistance_measurements(n_measurements=10, nplc=1):
+        str_channels = "(@111,{})".format(get_resistance_channels(deas))
+        n_channels = len(deas) * 2 + 1
+
+        scan_timeout = 1 * n_channels * n_measurements  # should never take more than 1 second per measurement
+
+        self.send_command("*RST")
+        self.send_command("FUNC 'VOLT:DC', {}".format(str_channels))
+        # daq.send_command("VOLT:DC:RANG:AUTO ON, {}".format(str_channels))
+        self.send_command("VOLT:DC:RANGe 10, {}".format(str_channels))
+        if aperture is None:
+            self.send_command("VOLT:DC:NPLC {}, {}".format(nplc, str_channels))
+        else:
+            self.send_command("VOLT:DC:APERture {}, {}".format(aperture, str_channels))
+        self.send_query("VOLT:DC:NPLC? {}".format(str_channels))
+        self.send_command("VOLT:DC:AZER OFF, {}".format(str_channels))
+        self.send_command("AZERo:ONCE")  # zero once now before starting the scan
+        self.send_command("ROUT:SCAN {}".format(str_channels))
+        self.send_command("ROUT:SCAN:COUN:SCAN {}".format(n_measurements))
+        self.send_command("INIT")
+        i = 1
+        start = time.monotonic()
+        elapsed = 0
+        while i < n_channels * n_measurements and elapsed < scan_timeout:
+            time.sleep(0.1)
+            i = int(self.send_query("TRACe:ACTual?"))
+            print(i)
+            elapsed = time.monotonic() - start
+
+        data = self.send_query("TRACe:DATA? 1, {}, \"defbuffer1\", READ".format(i))
+        data = data.split(",")
+        data = [float(d) for d in data]
+        data = np.array(data)
+        data = np.reshape(data, (n_measurements, n_channels))
+
+        np.set_printoptions(formatter={'float': '{: 0.3f}'.format})  # set print format for arrays
+
+        Vsource = data[:, 0]
+
+        data = data[:, 1:]  # don't need the reference voltage anymore
+
+        data = np.reshape(data, (n_measurements, n_deas, 2))
+        Vshunt = data[:, :, 0]
+        VDEA = data[:, :, 1]
+        Rshunt = 100000  # 100kOhm  TODO: read in real calibration data
+
+        Ishunt = Vshunt / Rshunt
+        RDEA = VDEA / Ishunt
+
+        print("Vsource:", Vsource, "V")
+        print("")
+        print("Vshunt: [DEA0, DEA1, ...]")
+        print(Vshunt)
+        print("")
+        print("VDEA: [DEA0, DEA1, ...]")
+        print(VDEA)
+        print("")
+        print("Ishunt: [DEA0, DEA1, ...] in mA")
+        print(Ishunt * 1000)
+
+        print("")
+        print("")
+        print("Resistances: [DEA0, DEA1, ...] in kΩ")
+        print(RDEA / 1000)
+
+        return list(np.mean(RDEA, axis=0))
+
+
+def test_resistance_measurement():
     daq = DAQ6510()
-    print("connected to ", daq.get_instrument_name())
-
-    str_channels = "(@111, 103:110, 117:120)"
-    n_channels = 13
-
-    daq.send_command("*RST")
-    daq.send_command("FUNC 'VOLT:DC', {}".format(str_channels))
-    daq.send_command("VOLT:DC:RANG:AUTO ON, {}".format(str_channels))
-    daq.send_command("VOLT:DC:NPLC {}, {}".format(nplc, str_channels))
-    daq.send_query("VOLT:DC:NPLC? {}".format(str_channels))
-    daq.send_command("VOLT:DC:AZER ON, {}".format(str_channels))
-    daq.send_command("ROUT:SCAN {}".format(str_channels))
-    daq.send_command("ROUT:SCAN:COUN:SCAN {}".format(n_measurements))
-    # TODO: disable auto 0 and auto range to see if that helps fixing inconsistencies in resistance measurements
-    daq.send_command("INIT")
-    i = 1
-    start = time.monotonic()
-    while i < n_channels * n_measurements:
-        time.sleep(0.3)
-        i = int(daq.send_query("TRACe:ACTual?"))
-        print(i)
-    stop = time.monotonic()
-
-    data = daq.send_query("TRACe:DATA? 1, {}, \"defbuffer1\", READ".format(i))
-    data = data.split(",")
-    data = [float(d) for d in data]
-    data = np.array(data)
-    data = np.reshape(data, (n_measurements, n_channels))
-
-    np.set_printoptions(formatter={'float': '{: 0.3f}'.format})  # set print format for arrays
-
-    Vsource = data[:, 0]
-    print("Vsource:", Vsource, "V")
-
-    data = data[:, 1:]  # don't need the reference voltage anymore
-    n_channels -= 1
-    n_deas = int(n_channels / 2)
-
-    print("")
-    print("Voltages: [Vshunt0, VDEA0, Vshunt1, VDEA1, ...]")
-    print(data)
-
-    data = np.reshape(data, (n_measurements, n_deas, 2))
-    Vshunt = data[:, :, 0]
-    VDEA = data[:, :, 1]
-    Rshunt = 100000  # 100kOhm
-
-    Ishunt = Vshunt / Rshunt
-    RDEA = VDEA / Ishunt
-
-    RDEA_k = RDEA / 1000  # in kΩ
-    Ishunt_m = Ishunt * 1000  # in mA
-
-    print("")
-    print("Vshunt: [DEA0, DEA1, ...]")
-    print(Vshunt)
-    print("")
-    print("VDEA: [DEA0, DEA1, ...]")
-    print(VDEA)
-    print("")
-    print("Ishunt: [DEA0, DEA1, ...]")
-    print(Ishunt_m)
-
-    print("")
-    print("")
-    print("Resistances: [DEA0, DEA1, ...] in kΩ")
-    print(RDEA_k)
-
-    print("")
-    print("elapsed time:", stop - start)
-
-    mat = {'R': RDEA_k, 't': stop - start, 'NPLC': nplc}
-    sio.savemat('test_data/DAQ_test_{}.mat'.format(datetime.now().strftime("%Y%m%d-%H%M%S")), mat)
+    res = daq.get_resistance_measurement([0], n_measurements=3, aperture=0.1)
+    print("Result:", res)
 
 
 def test_current_measurements():
@@ -571,7 +592,8 @@ if __name__ == '__main__':
     # for n_m, n_plc in zip(n_meas, nplcs):
     #     test_resistance_measurements(n_m, n_plc)
 
-    test_current_measurements()
+    test_resistance_measurement()
+    # test_current_measurements()
     # measure_resistance_sequence()
     # test_digitize_current()
     # test_digitize_voltage()

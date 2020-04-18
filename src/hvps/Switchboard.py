@@ -255,9 +255,16 @@ class SwitchBoard(HVPS):
 
 
 if __name__ == '__main__':
+    import matplotlib.pyplot as plt
+    import numpy as np
+
     sb = SwitchBoard()
     sb.open(with_continuous_reading=True)
-    Vset = 1000
+    t_start = time.monotonic()
+    Vset = 900
+    freq = 2
+    cycles_remaining = []
+    tc = []
     print(sb.get_name())
     # print("sp: ", sb.get_voltage_setpoint())
     # print("now: ", sb.get_current_voltage())
@@ -267,12 +274,13 @@ if __name__ == '__main__':
     # print("now: ", sb.get_current_voltage())
     # print(sb.set_relays_on())
     # print(sb.get_relay_state())
-    # gains = sb.set_pid_gains((0.32, 1.7, 0.005))
-    gains = sb.get_pid_gains()
-    print("PID gains:", gains)
+    # gains = sb.set_pid_gains((0.26, 2.1, 0.005))
+    # gains = sb.get_pid_gains()
+    # print("PID gains:", gains)
 
     sb.set_output_off()  # = set_switching_mode(0)
     print(sb.set_relay_auto_mode())
+    # sb.set_relays_on()
     # time.sleep(1)
     # print(sb.get_relay_state())
     # time.sleep(1)
@@ -281,7 +289,7 @@ if __name__ == '__main__':
     # time.sleep(1)
     # print(sb.set_relays_off())
     # time.sleep(1)
-    sb.set_output_on()
+    # sb.set_output_on()
     # print("set1: ", sb.set_voltage(700))
     # time.sleep(0.1)
     # print("set2: ", sb.set_voltage(800))
@@ -290,39 +298,73 @@ if __name__ == '__main__':
     # time.sleep(0.1)
     print("set4: ", sb.set_voltage(Vset))
     # print("sp: ", sb.get_voltage_setpoint())
-    # sb.set_frequency(1)
+    time.sleep(1)
+    sb.set_frequency(freq)
+    sb.set_cycle_number(30)
+    tc.append(time.monotonic() - t_start)
+    cn = sb.get_cycle_number()
+    print(cn)
+    cn = np.diff(cn)[0]
+    print(cn)
+    cycles_remaining.append(cn)
     # print("f: ", sb.get_frequency())
-    # sb.start_ac_mode()  # = set_switching_mode(2)
-    # time.sleep(2)
+    sb.start_ac_mode()  # = set_switching_mode(2)
     # print("now: ", sb.get_current_voltage())
     # print("sp: ", sb.get_voltage_setpoint())
-    time.sleep(2)
+    # time.sleep(2)
+    # sb.set_switching_mode(0)  # DC
+
+    for i in range(75):
+        time.sleep(0.2)
+        tc.append(time.monotonic() - t_start)
+        cn = sb.get_cycle_number()
+        print(cn)
+        cn = np.diff(cn)[0]
+        print(cn)
+        cycles_remaining.append(cn)
+
     # print("now: ", sb.get_current_voltage())
     # print(sb.get_relay_state())
-    # time.sleep(2)
-    # print(sb.set_relays_off())
     # time.sleep(1)
+    # sb.set_switching_mode(1)  # DC
+    # print(sb.set_relays_off())
+    # time.sleep(0.5)
+    sb.set_output_off()
+    tc.append(time.monotonic() - t_start)
+    cn = sb.get_cycle_number()
+    print(cn)
+    cn = np.diff(cn)[0]
+    print(cn)
+    cycles_remaining.append(cn)
     print("set: ", sb.set_voltage(0))
     print("sp: ", sb.get_voltage_setpoint())
     time.sleep(1.5)
+
+    tc.append(time.monotonic() - t_start)
+    cn = sb.get_cycle_number()
+    print(cn)
+    cn = np.diff(cn)[0]
+    print(cn)
+    cycles_remaining.append(cn)
     # print("now: ", sb.get_current_voltage())
     # print("sp: ", sb.get_voltage_setpoint())
-    sb.set_output_off()
     sb.close()
 
-    import matplotlib.pyplot as plt
-    import numpy as np
-
     it = sb.times > 0
-    t = sb.times[it]
+    tV = sb.times[it]
     V = sb.voltage[it]
-    plt.plot(t, np.array(V) * 0 + Vset)
-    plt.plot(t, V)
+    fig, ax1 = plt.subplots()
+    ax1.plot(tV, np.array(V) * 0 + Vset)
+    ax1.plot(tV, V)
+    ax2 = ax1.twinx()
+    ax2.plot(tc, cycles_remaining)
     plt.xlabel("Time [s]")
-    plt.ylabel("Voltage [V]")
-    title = "Hermione PID {} {}V 3-DEAs".format(str(gains), Vset)
+    ax1.set_ylabel("Voltage [V]")
+    ax2.set_ylabel("Cycles remaining")
+    # title = "Hermione PID {} {}V 3-DEAs".format(str(gains), Vset)
+    title = "Hermione AC mode {}Hz {}V 1-shorted".format(freq, Vset)
     plt.title(title)
-    plt.savefig("test_data/pid/" + title + ".png")
+    plt.savefig("test_data/ac/" + title + ".png")
     plt.show()
 
     # ---------- this breaks the switchboard firmware - no longer responds to voltage commands ---------
