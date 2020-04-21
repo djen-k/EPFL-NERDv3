@@ -4,7 +4,7 @@ import os
 
 
 class DataSaver:
-    def __init__(self, nbDea, outFilename="testing.csv", overwrite=False):
+    def __init__(self, active_deas, outFilename="testing.csv", overwrite=False):
         """
         Constructor for DataSaver class
         :param nbDea: Number of DEAs ^m used to generate the right number of fields
@@ -17,7 +17,7 @@ class DataSaver:
         self.logging.info("Data saver instantiation: {}".format(outFilename))
 
         # Save parameters
-        self.nbDea = nbDea
+        self.active_deas = active_deas
 
         # Open file in which we'll write data, avoid deleting data if overWrite is not true
         if os.path.isfile(outFilename) and not overwrite:
@@ -32,10 +32,11 @@ class DataSaver:
         self.dataFields = ["timestamp", "elapsed_time", "time_at_max_V",
                            "test_state", "target_voltage", "measured_voltage"]
 
-        for i in range(nbDea):
+        for i in active_deas:
+            i += 1  # switch to 1-based indexing for user output
             self.dataFields.append("DEA{}_electrical_state".format(i))
             self.dataFields.append("DEA{}_visual_state".format(i))
-            # self.dataFields.append("DEA{}_resistance".format(i))
+            self.dataFields.append("DEA{}_resistance".format(i))
             self.dataFields.append("DEA{}_strain_area".format(i))
             self.dataFields.append("DEA{}_strain_X".format(i))
             self.dataFields.append("DEA{}_strain_Y".format(i))
@@ -48,10 +49,10 @@ class DataSaver:
         # define units
 
         self.units = ["[datetime]", "[s]", "[s]", "[0: Ramp, 1: High, 2: Low]", "[V]", "[V]"]
-        for i in range(nbDea):
+        for i in active_deas:
             self.units.append("[1: OK, 0: Failed]")
             self.units.append("[1: OK, 0: Failed]")
-            # self.units.append("[Ohm]")
+            self.units.append("[kOhm]")
             self.units.append("[%]")
             self.units.append("[%]")
             self.units.append("[%]")
@@ -85,22 +86,21 @@ class DataSaver:
         data["target_voltage"] = target_voltage
         data["measured_voltage"] = measured_voltage
 
-        # TODO: create option to choose channels (e.g. use only channels 1, 2, 5, 6)
-        for i in range(self.nbDea):
+        for i in self.active_deas:
             if visual_state is not None and i < len(visual_state):
-                data["DEA{}_electrical_state".format(i)] = visual_state[i]
+                data["DEA{}_electrical_state".format(i + 1)] = visual_state[i]
             if electrical_state is not None and i < len(electrical_state):
-                data["DEA{}_visual_state".format(i)] = electrical_state[i]
+                data["DEA{}_visual_state".format(i + 1)] = electrical_state[i]
             if resistance is not None and i < len(resistance):
-                data["DEA{}_resistance".format(i)] = resistance[i]
+                data["DEA{}_resistance".format(i + 1)] = resistance[i]
             if strain_AXYa is not None and i < strain_AXYa.shape[0]:
-                data["DEA{}_strain_area".format(i)] = strain_AXYa[i, 0]
-                data["DEA{}_strain_X".format(i)] = strain_AXYa[i, 1]
-                data["DEA{}_strain_Y".format(i)] = strain_AXYa[i, 2]
-                data["DEA{}_strain_average".format(i)] = strain_AXYa[i, 3]
+                data["DEA{}_strain_area".format(i + 1)] = strain_AXYa[i, 0]
+                data["DEA{}_strain_X".format(i + 1)] = strain_AXYa[i, 1]
+                data["DEA{}_strain_Y".format(i + 1)] = strain_AXYa[i, 2]
+                data["DEA{}_strain_average".format(i + 1)] = strain_AXYa[i, 3]
             if center_shift is not None and i < center_shift.shape[0]:
-                data["DEA{}_center_X".format(i)] = center_shift[i, 0]
-                data["DEA{}_center_Y".format(i)] = center_shift[i, 1]
+                data["DEA{}_center_X".format(i + 1)] = center_shift[i, 0]
+                data["DEA{}_center_Y".format(i + 1)] = center_shift[i, 1]
 
         if image_saved:
             data["imagefile"] = timestamp.strftime("%Y%m%d-%H%M%S")  # same as in image file name, to help find it

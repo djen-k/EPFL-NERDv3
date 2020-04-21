@@ -32,6 +32,8 @@ class SetupDialog(QtWidgets.QDialog):
         self._n_deas = n_deas
         n_cols = 3
 
+        self.com_ports = []
+
         # self._preview_img_size = [640, 360]  # [720, 405]  # [800, 450]
         img_size = [1920, 1080]
         self._preview_img_size = Screen.get_max_size_on_screen(img_size, (2, 3), (80, 600))
@@ -117,7 +119,7 @@ class SetupDialog(QtWidgets.QDialog):
         formLay.addRow("Measure every (s):", self.num_measurement_period)
 
         # create image save period selector
-        self.num_save_image_period = self.create_num_selector(0, 1000, "image_save_period_min", 30)
+        self.num_save_image_period = self.create_num_selector(0, 1000, "save_image_period_min", 30)
         formLay.addRow("Save images every (min):", self.num_save_image_period)
 
         # checkbox to enable AC mode
@@ -126,7 +128,7 @@ class SetupDialog(QtWidgets.QDialog):
         formLay.addRow("", self.chk_ac)
 
         # create AC frequency selector
-        self.num_ac_frequency = self.create_num_selector(1, 1000, "ac_frequency", 50)
+        self.num_ac_frequency = self.create_num_selector(1, 1000, "ac_frequency_hz", 50)
         self.num_ac_frequency.valueChanged.connect(self.updateCycles)
         formLay.addRow("Switching frequency [Hz]:", self.num_ac_frequency)
 
@@ -281,20 +283,20 @@ class SetupDialog(QtWidgets.QDialog):
 
         self._startup = False
 
-    def create_num_selector(self, min_val, max_val, default_key, default_value):
+    def create_num_selector(self, min_val, max_val, config_key, default_value):
         """
         Creates a QSpinBox for setting numeric values.
         :param min_val: Minimum value
         :param max_val: Maximum value
-        :param default_key: Key to look up default value in the defaults dict
+        :param config_key: Key to look up default value in the defaults dict
         :param default_value: Value to use if the key is not in the defaults dict
         :return: A QSpinBox with the given range and value
         """
         num = QtWidgets.QSpinBox()
         num.setMinimum(min_val)
         num.setMaximum(max_val)
-        if default_key in self._defaults:
-            value = self._defaults[default_key]
+        if config_key in self._defaults:
+            value = self._defaults[config_key]
         else:
             value = default_value
         num.setValue(value)
@@ -335,10 +337,6 @@ class SetupDialog(QtWidgets.QDialog):
         ports = self._hvps.detect()
         display_names = ["{} ({})".format(p.name.decode("ASCII"), p.port) for p in ports]
         port_names = [p.port for p in ports]
-        # comports = QtSerialPort.QSerialPortInfo().availablePorts()
-        # portnames = [info.portName() for info in comports]
-        # comports = serial.tools.list_ports.comports()
-        # portnames = comports[0].name
         self.cbb_port_name.addItems(display_names)
 
         # select the default COM port, if it is available
@@ -346,8 +344,9 @@ class SetupDialog(QtWidgets.QDialog):
             idx = port_names.index(self._defaults["com_port"])
             if idx != self.cbb_port_name.currentIndex():  # only set if the index is different to avoid reconnect
                 self.cbb_port_name.setCurrentIndex(idx)
-        # else:  # no default or default not available --> pick first one
-        #     self.cbb_port_name.setCurrentIndex(0)
+        # if no default or default not available --> use index 0 which is selected by default
+
+        self.com_ports = port_names
 
         self.cbb_port_name.blockSignals(False)  # turn signals back on
         self.cbb_comport_changed()  # call comport changed once to connect to the newly selected com port
@@ -604,7 +603,7 @@ class SetupDialog(QtWidgets.QDialog):
         :return: A config dict with all the parameters, as well as a strain detector with pre-set strain reference
         """
         config = {
-            "com_port": self.cbb_port_name.currentText(),
+            "com_port": self.com_ports[self.cbb_port_name.currentIndex()],
             "cam_order": self.getCamOrder(),
             "voltage": self.num_voltage.value(),
             "steps": self.num_steps.value(),
@@ -614,7 +613,7 @@ class SetupDialog(QtWidgets.QDialog):
             "measurement_period_s": self.num_measurement_period.value(),
             "save_image_period_min": self.num_save_image_period.value(),
             "ac_mode": self.chk_ac.isChecked(),
-            "ac_frequency": self.num_ac_frequency.value(),
+            "ac_frequency_hz": self.num_ac_frequency.value(),
             "average_images": self.num_avg_img.value()
         }
 

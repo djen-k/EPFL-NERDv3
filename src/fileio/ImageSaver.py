@@ -10,16 +10,18 @@ class ImageSaver:
     RESULT_IMAGE_DIR = "Strain detection results"
     IMAGE_FORMAT = "png"
 
-    def __init__(self, save_dir, n_deas, dea_labels=None, save_result_images=False):
+    def __init__(self, save_dir, active_deas, dea_labels=None, save_result_images=False):
         self.logging = logging.getLogger("ImageSaver")
         self.save_dir = save_dir
-        self.n_deas = n_deas
+        self.active_deas = active_deas
+        self.n_deas = len(active_deas)
         self.save_result_images = save_result_images
         if dea_labels is None:
-            dea_labels = ["DEA {}".format(i + 1) for i in range(n_deas)]
-        assert len(dea_labels) == n_deas
+            dea_labels = ["DEA {}".format(i + 1) for i in active_deas]
+        else:
+            assert len(dea_labels) == self.n_deas
         self.dea_labels = dea_labels
-        self._dirs = ["{}/{}".format(save_dir, dea_labels[i]) for i in range(n_deas)]
+        self._dirs = ["{}/{}".format(save_dir, label) for label in dea_labels]
         self.check_dirs()  # create dirs if they don't already exist
 
     def check_dirs(self):

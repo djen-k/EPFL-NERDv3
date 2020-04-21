@@ -51,6 +51,21 @@ class StrainDetector:
             return [get_image_deviation(img, ref) for img, ref in zip(images, self._reference_images)]
 
     def get_dea_strain(self, imgs, output_result_image=False, check_visual_state=False, title=""):
+        """
+        Detect strain for the given set of images.
+        :param imgs: A set of images (1 image per DEA)
+        :param output_result_image: if True, the function returns a visualisation of the measured strain
+        :param check_visual_state: Checks if any image has deviated too much from its reference
+        :param title: A title to print on the result image
+        :return: four object containing the strain, center shift, result images, and visual_state for each of the
+        n input images. 'strain' is a n-by-4 array with the following columns:
+        [area strain, radial strain X, radial strain Y, average radial strain (sqrt of area strain)]
+        'center shift' is a n-by-2 array containing the shift in X and Y direction, in pixels
+        (reference: top left corner).
+        'result images' is a n-element list of images with a visualization of the measured strain.
+        'visual' state is a n-element list of ints indicating 1 if an image is OK, or 0 if an image shows great
+        deviation from its reference image.
+        """
 
         n_img = len(imgs)
 
@@ -307,7 +322,7 @@ def dea_fit_ellipse(img, mask=None, closing_radius=10, algorithm=1):
     return ellipse, mask
 
 
-def find_electrode_outline(img_bw, exclude_mask=None, iterations=20, center=None):
+def find_electrode_outline(img_bw, exclude_mask=None, max_iterations=20, center=None, convergence_threshold=0.00001):
     if img_bw is None:
         logger.warning("No binary image specified!")
         return None, None
@@ -352,15 +367,15 @@ def find_electrode_outline(img_bw, exclude_mask=None, iterations=20, center=None
 
         # count iterations to abort after a while if the result does not converge for some reason
         i += 1
-        if i >= iterations:
+        if i >= max_iterations:
             break
 
         if old_area == 0:
             converged = False
         else:
-            converged = (old_area - new_area) / old_area < 0.0001
+            converged = (old_area - new_area) / old_area < convergence_threshold
 
-    if i < iterations:
+    if i < max_iterations:
         logger.debug("Electrode outline detection converged after {} iterations".format(i))
     else:
         logger.warning("Electrode outline detection did not converge. Aborted after {} iterations".format(i))

@@ -1,7 +1,7 @@
 import logging
 import time
 from datetime import datetime
-from threading import Thread, Event
+from threading import Thread, Event, Lock, Timer
 
 import cv2 as cv
 import numpy as np
@@ -20,6 +20,8 @@ class Camera:
         # set properties
         if desired_resolution is not None:
             self.set_resolution(desired_resolution)
+
+        self.access_lock = Lock()  # to prevent accessing the same camera from multiple threads
 
         # init buffers
         self.name = "Camera {}".format(index + 1)  # use 1-based indexing for natural names
@@ -46,18 +48,18 @@ class Camera:
         Grab a frame from this camera. The frame is not retrieved at this point.
         :return: a flag indicating success or failure
         """
-        cam = self.cap
-        if not cam.isOpened():  # just to be sure. this should never be the case, theoretically
-            self.logging.debug("{} is not open".format(self.name))
-            return
+        with self.access_lock:
+            if not self.cap.isOpened():  # just to be sure. this should never be the case, theoretically
+                self.logging.debug("{} is not open".format(self.name))
+                return
 
-        suc = cam.grab()  # call grab to quickly obtain a frame, which can be decoded with "retrieve()" later
-        if suc:
-            self.grab_timestamp = datetime.now()  # record timestamp of the grabbed image
-        else:
-            self.logging.warning("Unable to grab frame from {}".format(self.name))
+            suc = self.cap.grab()  # call grab to quickly obtain a frame, which can be decoded with "retrieve()" later
+            if suc:
+                self.grab_timestamp = datetime.now()  # record timestamp of the grabbed image
+            else:
+                self.logging.warning("Unable to grab frame from {}".format(self.name))
 
-        self.grab_ok = suc
+            self.grab_ok = suc
         return suc
 
     def retrieve(self):
@@ -65,34 +67,33 @@ class Camera:
         Retrieve a frame from the specified camera and store it in the buffer
         :return: a flag indicating success or failure, and the retrieved frame (or None, if unsuccessful)
         """
-        cam = self.cap
+        with self.access_lock:
+            if not self.cap.isOpened():  # just to be sure. this should never be the case, theoretically
+                self.logging.debug("{} is not open".format(self.name))
+                return False, None
 
-        if not cam.isOpened():  # just to be sure. this should never be the case, theoretically
-            self.logging.debug("{} is not open".format(self.name))
-            return False, None
+            if self.grab_ok:  # check if previous grab was successful
+                suc, frame = self.cap.retrieve()  # retrieve frame previously captured by "grab()"
 
-        if self.grab_ok:  # check if previous grab was successful
-            suc, frame = cam.retrieve()  # retrieve frame previously captured by "grab()"
+                if suc:
+                    self.image_buffer = frame.copy()  # store copy in buffer so we cn return this instance
+                    self.image_timestamp = self.grab_timestamp  # update the timestamp
 
-            if suc:
-                self.image_buffer = frame.copy()  # store copy in buffer so we cn return this instance
-                self.image_timestamp = self.grab_timestamp  # update the timestamp
+                    self.logging.debug("Retrieved frame from {}. Size: {}".format(self.name, frame.shape))
 
-                self.logging.debug("Retrieved frame from {}. Size: {}".format(self.name, frame.shape))
+                    # if callback is defined, call callback function
+                    if self.new_image_callback is not None:
+                        self.logging.debug("Calling new image callback for {}".format(self.name))
+                        self.new_image_callback(frame, self.image_timestamp, self.name)
 
-                # if callback is defined, call callback function
-                if self.new_image_callback is not None:
-                    self.logging.debug("Calling new image callback for {}".format(self.name))
-                    self.new_image_callback(frame, self.image_timestamp, self.name)
+                    return True, frame
+                else:
+                    self.logging.warning("Unable to retrieve frame from {}".format(self.name))
 
-                return True, frame
-            else:
-                self.logging.warning("Unable to retrieve frame from {}".format(self.name))
+            else:  # previous grab was not successful
+                self.logging.warning("Last grab from {} was unsuccessful. No image was retrieved".format(self.name))
 
-        else:  # previous grab was not successful
-            self.logging.warning("Last grab from {} was unsuccessful. No image was retrieved".format(self.name))
-
-        self.image_buffer = None  # clear buffer to indicate no current image is available
+            self.image_buffer = None  # clear buffer to indicate no current image is available
         return False, None
 
     def read(self):
@@ -131,6 +132,7 @@ class ImageCapture:
         self.desired_resolution = [1920, 1080]
         self.auto_reconnect = True
         self.max_reconnect_attempts = 3
+        self.max_fps = 0  # unlimited
 
         # internal variables
         self._cameras = []
@@ -149,8 +151,12 @@ class ImageCapture:
         self._new_image_callback = None
         self.new_set_callback = None
 
+    def __del__(self):
+        self.stop_capture_thread(block=True)  # wait to make sure the capture thread stopped before closing cams
+        self.close_cameras()
+
     def _reset(self):
-        # todo: end capture thread if it's running
+        self.stop_capture_thread(block=True)  # wait to make sure the capture thread stopped before closing cams
         self.close_cameras()
         self._cameras = []
         self._camera_count = -1
@@ -171,7 +177,7 @@ class ImageCapture:
     def set_new_set_callback(self, new_set_callback):
         """
         Set a function to call every time a new set of images becomes available (i.e. one new image from each camera)
-        :param new_set_callback: Callback function of prototype: func(images[], timestamps[])
+        :param new_set_callback: Callback function of prototype: func(images -> list, timestamps -> list)
         """
         self.new_set_callback = new_set_callback
 
@@ -267,7 +273,7 @@ class ImageCapture:
         """
         Opens all available image capture devices and stores a handle to each device as well as a list of device names
         (currently just "Camera [index]"). One initial image from each camera is retrieved and stored in the buffer.
-        Can be used to re-initialize the cameras.
+        This method can be used to re-initialize the cameras.
         :return: A list of the available cameras
         """
 
@@ -497,7 +503,9 @@ class ImageCapture:
             logging.warning("No callback is set!")
 
         self._exit_flag = Event()
-        self._capture_thread = ImageCaptureThread(self, max_fps, self._exit_flag)
+        self.max_fps = max_fps
+        self._capture_thread = Thread()  # ImageCaptureThread(self, max_fps, self._exit_flag)
+        self._capture_thread.run = self.run_capture_thread
         self._capture_thread.start()
 
     def stop_capture_thread(self, block=False):
@@ -515,6 +523,23 @@ class ImageCapture:
         if self._capture_thread is None:
             return False
         return self._capture_thread.is_alive()
+
+    def run_capture_thread(self):
+        if self.max_fps > 0:
+            min_delay = 1 / self.max_fps
+        else:
+            min_delay = 0  # no minimum delay -> capture at maximum fps
+
+        try:
+            delay = 0  # initial delay is 0
+            while not self._exit_flag.wait(delay):
+                t_start = time.monotonic()
+                self.read_images()
+                t_end = time.monotonic()
+                elapsed_time = t_end - t_start
+                delay = min_delay - elapsed_time - 0.01  # get remaining time to wait (subtract 10 ms for overhead)
+        except Exception as ex:
+            self.logging.error("Exception in capture thread: {}".format(ex))
 
     def set_fixed_exposure(self):
         """
@@ -534,9 +559,9 @@ class ImageCapture:
         self.set_camera_property(cv.CAP_PROP_AUTO_EXPOSURE, 1)  # turn auto exposure on
         time.sleep(3)  # wait for auto exposure to settle (at least 2.2 s!)
         refs = self.read_images()  # record set of images with auto exposure
-        for i in range(len(refs)):
-            cv.imshow('Camera {} - press [q] to exit'.format(i), cv.resize(refs[i], (0, 0), fx=0.25, fy=0.25))
-        res = cv.waitKey(0)
+        # for i in range(len(refs)):
+        #     cv.imshow('Camera {} - press [q] to exit'.format(i), cv.resize(refs[i], (0, 0), fx=0.25, fy=0.25))
+        # res = cv.waitKey(0)
 
         self.set_camera_property(cv.CAP_PROP_AUTO_EXPOSURE, 0)  # turn auto exposure off
         exposures = np.ones(self._camera_count) * -13
@@ -557,6 +582,7 @@ class ImageCapture:
             prev_deviation = new_deviation
 
         self.set_camera_property(cv.CAP_PROP_EXPOSURE, exposures)  # set best exposure
+        time.sleep(0.5)  # wait a little while so the cameras can adjust their exposure before the next image is grabbed
         self.logging.debug("Exposure levels fixed at {}".format(exposures))
         return exposures
 
@@ -633,33 +659,6 @@ class ImageCapture:
         res = cv.waitKey(0)
 
 
-class ImageCaptureThread(Thread):
-
-    # TODO add mutex
-
-    def __init__(self, image_capture: ImageCapture, max_fps, exit_flag: Event):
-        Thread.__init__(self)
-        self._image_capture = image_capture
-        self._exit_flag = exit_flag
-        if max_fps > 0:
-            self._min_delay = 1.0 / max_fps
-        else:
-            self._min_delay = 0  # no minimum delay -> capture at maximum fps
-
-    def run(self):
-        try:
-            delay = 0  # initial delay is 0
-            while not self._exit_flag.wait(delay):
-                start_time = datetime.now()
-                self._image_capture.read_images()
-                end_time = datetime.now()
-                elapsed_time = end_time - start_time
-                delay = self._min_delay - elapsed_time.total_seconds()  # calculate remaining time to wait
-                # self._image_capture.logging.debug("loop complete. delay: {}".format(delay))
-        except Exception as ex:
-            self._image_capture.logging.error("Exception in CemeraSelection.updateImage: {}".format(ex))
-
-
 SharedInstance = ImageCapture()
 
 if __name__ == '__main__':
@@ -668,19 +667,42 @@ if __name__ == '__main__':
 
     cap = SharedInstance
     cap.find_cameras()
-    cap.select_cameras([0, 2])
+    cap.select_cameras([0])
 
-    cap.set_camera_property(cv.CAP_PROP_AUTO_EXPOSURE, 0)
-    cap.set_camera_property(cv.CAP_PROP_EXPOSURE, 0)
-    time.sleep(0.3)
+    # print("exposure:", cap.set_fixed_exposure())
 
-    cap.set_camera_property(cv.CAP_PROP_XI_AUTO_WB, 0)
+    times = []
+    frames = []
+    lock = Lock()
+    timestamp_start = datetime.now()  # record reference time
 
-    print("exposure:", cap.set_fixed_exposure())
-    time.sleep(0.5)
-    res = 0
-    while res != ord('q'):
-        _imgs = cap.read_images()
-        for i in range(len(_imgs)):
-            cv.imshow('Camera {} - press [q] to exit'.format(i), cv.resize(_imgs[i], (0, 0), fx=0.25, fy=0.25))
-        res = cv.waitKey(100)
+
+    def new_frame(image, timestamp, camera_id):
+        with lock:
+            frames.append(image)
+            times.append((timestamp - timestamp_start).total_seconds())
+            print("received frame {}".format(len(frames)))
+
+
+    cap.set_new_image_callback(new_frame)
+    cap.start_capture_thread(max_fps=0)
+    timer = Timer(10, cap.stop_capture_thread)
+    timer.start()
+
+    frame_index = 0
+    time.sleep(11)
+    # while cap.is_capture_thread_running():
+    #     with lock:
+    #         if len(frames) > frame_index:
+    #             cv.imshow("Current Frame", frames[-1])
+    #             cv.waitKey(1)  # refresh window and check for user input
+    #             frame_index = len(frames)
+
+    elapsed_time_s = (datetime.now() - timestamp_start).total_seconds()
+    cap.close_cameras()
+
+    print("elapsed time: {} s".format(elapsed_time_s))
+    np.set_printoptions(formatter={'float': '{: 0.2f}'.format}, linewidth=500)  # set print format for arrays
+    print(np.array(times).reshape((-1, 1)))
+    time.sleep(1)
+    logging.info("done")

@@ -6,7 +6,7 @@ from datetime import datetime
 
 import cv2 as cv
 import numpy as np
-from PyQt5.QtWidgets import QMainWindow, QWidget, QVBoxLayout, QApplication, QMessageBox
+from PyQt5.QtWidgets import QMainWindow, QWidget, QVBoxLayout, QApplication
 
 from libs import duallog
 from src.fileio.DataSaver import DataSaver
@@ -15,6 +15,7 @@ from src.fileio.config import read_config, write_config
 from src.gui import SetupDialog, Screen
 from src.hvps.Switchboard import SwitchBoard
 from src.image_processing import ImageCapture, StrainDetection
+from src.measurement.keithley import DAQ6510
 
 
 class App(QMainWindow):
@@ -96,18 +97,30 @@ class NERD:
         self.logging = logging.getLogger("NERD")
         self.config = config
         self.image_cap = ImageCapture.SharedInstance
-        # TODO: implement robust system for getting number of DEAs and dealing with unexpected number of images etc.
-        self.n_dea = self.image_cap.get_camera_count()  # this works if we previously selected the cameras
+        # TODO: implement robust system for dealing with unexpected number of images etc.
+        # to get active DEAs, turn all -1 (=disabled) in cam order to 0, then find non-zeros (returns a tuple of arrays)
+        self.active_deas = np.nonzero(np.array(config["cam_order"]) + 1)[0].tolist()
+        self.n_dea = len(self.active_deas)
         self.strain_detector = strain_detector
 
         # connect to HVPS
         try:
-            self.hvpsInst = SwitchBoard()
-            self.hvpsInst.open(self.config["com_port"])
+            self.hvps = SwitchBoard()
+            self.hvps.open(self.config["com_port"])
         except Exception as ex:
-            self.logging.critical("Unable to connect to HVPS: {}".format(ex))
-            QMessageBox.critical(None, "Unable to connect to HVPS/Switchboard!",
-                                 "Could not connect to HVPS/Switchboard", QMessageBox.Ok)
+            self.logging.error("Unable to connect to HVPS: {}".format(ex))
+            raise ex
+
+        # connect to multimeter
+        if "daq_id" in self.config:
+            daq_id = self.config["daq_id"]
+        else:
+            daq_id = None  # --> find DAQ automatically
+        self.daq = DAQ6510([daq_id])
+        if not self.daq.is_connected():
+            msg = "Unable to connect to multimeter!"
+            self.logging.error(msg)
+            raise Exception(msg)
 
         # init some internal variable
         self.shutdown_flag = False
@@ -125,11 +138,11 @@ class NERD:
         cap = ImageCapture.SharedInstance  # get image capture
 
         # create an image saver for this session to store the recorded images
-        imsaver = ImageSaver(dir_name, self.n_dea, save_result_images=True)
+        imsaver = ImageSaver(dir_name, self.active_deas, save_result_images=True)
 
         # TODO: handle varying numbers of DEAs
         save_file_name = "{}/{} data.csv".format(dir_name, session_name)
-        saver = DataSaver(self.n_dea, save_file_name)
+        saver = DataSaver(self.active_deas, save_file_name)
 
         # store strain reference ##########################################################
 
@@ -165,16 +178,10 @@ class NERD:
         image_capture_period_s = self.config["save_image_period_min"] * 60  # convert to seconds
 
         ac_mode = self.config["ac_mode"]
-        ac_frequency = self.config["ac_frequency"]
+        ac_frequency = self.config["ac_frequency_hz"]
         ac_cycle_count = np.ceil(duration_high_s * ac_frequency)
         ac_cycle_count = max(ac_cycle_count, 1)  # make sure it's at least 1, otherwise the HVPS will cycle indefinitely
-        cycles_remaining = 0  # used to store remaining cycles when interrupting for a measurement
-
-        # set up HVPS ##############################################################################
-
-        self.hvpsInst.set_switching_mode(1)  # set to DC mode by default to make sure that the HV indicator LED works
-        self.hvpsInst.set_voltage(0, block_if_testing=True)  # make sure we start at 0 V
-        self.hvpsInst.set_relay_auto_mode()  # enable auto mode by default
+        ac_wait_before_measurement = 5  # self.config["ac_wait_before_measurement_s"]
 
         # set up state machine #############################################################
 
@@ -191,7 +198,7 @@ class NERD:
         prev_V_high = False
 
         # record start time
-        now = time.monotonic()
+        now = time.perf_counter()
         time_started = now
         time_last_state_change = now
         time_last_image_saved = now
@@ -199,8 +206,12 @@ class NERD:
         time_last_voltage_measurement = now
         duration_at_max_V = 0
 
+        # TODO: set switching mode in DC mode
+        # TODO: enable only active channels, once this is supported by the switchboard
+        self.hvps.set_relay_auto_mode()  # enable auto mode by default
+
         while self.shutdown_flag is not True:
-            now = time.monotonic()
+            now = time.perf_counter()
             now_tstamp = datetime.now()
 
             # ------------------------------
@@ -209,7 +220,7 @@ class NERD:
             dt_state_change = now - time_last_state_change  # time since last state change
 
             if ac_mode:
-                cycles_completed = self.hvpsInst.get_cycle_number()  # check how many cycles have been completed
+                cycles_completed = self.hvps.get_cycle_number()  # check how many cycles have been completed
             else:
                 cycles_completed = None
 
@@ -269,12 +280,15 @@ class NERD:
                 logging.critical("Unknown state in the state machine")
                 raise Exception
 
+            ##############################################################
             # check what actions need to happen this cycle
+            ##############################################################
+
+            # check if state will change at then end of this cycle
             state_changing = new_state is not current_state or new_step is not current_step
             if state_changing:
-                self.logging.debug("State changeing from {} (step {}) to {} (step {})".format(current_state,
-                                                                                              current_step,
-                                                                                              new_state, new_step))
+                msg = "State changeing from {} (step {}) to {} (step {})"
+                self.logging.debug(msg.format(current_state, current_step, new_state, new_step))
 
             dt_measurement = now - time_last_measurement  # time since last state change
             measurement_due = dt_measurement > measurement_period_s or state_changing
@@ -286,26 +300,33 @@ class NERD:
             # self.logging.debug("Time since last image saved: {} s,  New image required: {}".format(dt_image_saved,
             #                                                                                        image_due))
 
-            # get switchboard state and pause test if it's checking for shorts
-            el_state = self.hvpsInst.get_relay_state()
+            ####################################################################
+            # pause test if switchboard is checking for shorts
+            ####################################################################
+
+            el_state = self.hvps.get_relay_state()
             if el_state[0] == 2:  # switchboard is testing
                 self.logging.info("Switchboard is testing for short circuits. NERD test paused...")
 
                 # wait for check to be over
-                time_pause_started = time.monotonic()
+                time_pause_started = time.perf_counter()
                 while el_state[0] == 2:
-                    el_state = self.hvpsInst.get_relay_state()
+                    el_state = self.hvps.get_relay_state()
                     time.sleep(0.01)
 
                 # extend time until next state change/measurement/image by the duration of the test
-                pause_duration = time.monotonic() - time_pause_started
+                pause_duration = time.perf_counter() - time_pause_started
                 time_last_state_change += pause_duration
                 time_last_measurement += pause_duration
                 time_last_image_saved += pause_duration
                 time_last_voltage_measurement += pause_duration
 
+            ###########################################################################
+            # Measurements
+            ###########################################################################
+
             # measure voltage and record time spent at high voltage
-            measuredVoltage = self.hvpsInst.get_current_voltage()
+            measuredVoltage = self.hvps.get_current_voltage()
             V_high = abs(measuredVoltage - max_voltage) < 50  # 50 V margin around max voltage counts as high
             if V_high and prev_V_high:
                 if current_state == STATE_WAITING_HIGH and ac_mode:
@@ -320,13 +341,15 @@ class NERD:
                 # if in AC mode, switch to DC for the duration of the measurement
                 if current_state == STATE_WAITING_HIGH and ac_mode:
                     self.logging.debug("Suspended AC mode during measurement")
-                    self.hvpsInst.set_switching_mode(1)  # set to DC. number of completed cycles will be remembered
-                    time_measurement_started = time.monotonic()  # record how long AC was suspended
+                    self.hvps.set_switching_mode(1)  # set to DC. number of completed cycles will be remembered
+                    time_measurement_started = time.perf_counter()  # record how long AC was suspended
+
+                    time.sleep(ac_wait_before_measurement)  # wait high for a few seconds before measurement
                 else:
                     time_measurement_started = None
 
                 # ------------------------------
-                # Record data (voltage, DEA state, images) TODO: resistance, current?
+                # Record data: images, TODO: resistance, current
                 # ------------------------------
 
                 # voltage and state are recorded on each cycle anyway.
@@ -338,18 +361,20 @@ class NERD:
                 # use timestamp of the last image for the whole set so they have a realistic and matching timestamp
                 # timestamp = cap.get_timestamps(cap.get_camera_count() - 1)
 
+                Rdea = self.daq.measure_DEA_resistance(self.active_deas, n_measurements=1, nplc=1)
+
                 # --- resume cycling if in AC mode -------------------------------------
                 if current_state == STATE_WAITING_HIGH and ac_mode:
-                    cycles_completed = self.hvpsInst.get_cycle_number()[0]  # cycles back to 0 if completed
+                    cycles_completed = self.hvps.get_cycle_number()[0]  # cycles back to 0 if completed
                     # don't turn AC back on if all cycles completed (otherwise it'll start over)
                     if cycles_completed > 0:
                         self.logging.debug("Resuming AC mode")
-                        self.hvpsInst.set_switching_mode(2)  # set back to AC
+                        self.hvps.set_switching_mode(2)  # set back to AC
                     else:  # should be extremely unlikely to happen but let's make a note if it does
                         self.logging.warning("AC mode note resumed after measurement because no more cycles remained")
 
                     # measurement time was only counted half in AC mode --> add other half
-                    time_measurement_ended = time.monotonic()
+                    time_measurement_ended = time.perf_counter()
                     measurement_duration = time_measurement_ended - time_measurement_started
                     duration_at_max_V += measurement_duration / 2
 
@@ -419,14 +444,14 @@ class NERD:
             if state_changing:
                 # set voltage for new state
                 current_target_voltage = new_target_voltage
-                ret = self.hvpsInst.set_voltage(current_target_voltage, block_if_testing=True)
+                ret = self.hvps.set_voltage(current_target_voltage, block_if_testing=True)
                 if ret is not True:
                     self.logging.debug("Failed to set voltage")
 
                 if new_state == STATE_WAITING_HIGH and ac_mode:
                     cycles_remaining = ac_cycle_count  # reset remaining cycles to the requested number cycles
-                    self.hvpsInst.set_cycle_number(cycles_remaining)
-                    self.hvpsInst.set_switching_mode(2)
+                    self.hvps.set_cycle_number(cycles_remaining)
+                    self.hvps.set_switching_mode(2)
 
                 current_state = new_state
                 current_step = new_step
@@ -447,10 +472,10 @@ class NERD:
                 self.shutdown_flag = True
 
         self.logging.critical("Exiting...")
-        self.hvpsInst.set_output_off()
-        self.hvpsInst.set_voltage(0, block_if_testing=True)
-        self.hvpsInst.set_relays_off()
-        del self.hvpsInst
+        self.hvps.set_output_off()
+        self.hvps.set_voltage(0, block_if_testing=True)
+        self.hvps.set_relays_off()
+        del self.hvps
         self.logging.critical("Turned voltage off and disconnected relays")
         saver.close()
         self.image_cap.close_cameras()

@@ -5,3 +5,4 @@
 /src/measurement/test_data/
 /config.txt
 *.mat
+/src/image_processing/logs/
