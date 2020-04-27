@@ -52,7 +52,7 @@ class DataSaver:
         for i in active_deas:
             self.units.append("[1: OK, 0: Failed]")
             self.units.append("[1: OK, 0: Failed]")
-            self.units.append("[kOhm]")
+            self.units.append("[Ohm]")
             self.units.append("[%]")
             self.units.append("[%]")
             self.units.append("[%]")
@@ -86,21 +86,22 @@ class DataSaver:
         data["target_voltage"] = target_voltage
         data["measured_voltage"] = measured_voltage
 
-        for i in self.active_deas:
-            if visual_state is not None and i < len(visual_state):
-                data["DEA{}_electrical_state".format(i + 1)] = visual_state[i]
+        for i in range(len(self.active_deas)):
+            disp_id = self.active_deas[i] + 1
             if electrical_state is not None and i < len(electrical_state):
-                data["DEA{}_visual_state".format(i + 1)] = electrical_state[i]
+                data["DEA{}_electrical_state".format(disp_id)] = electrical_state[i]
+            if visual_state is not None and i < len(visual_state):
+                data["DEA{}_visual_state".format(disp_id)] = visual_state[i]
             if resistance is not None and i < len(resistance):
-                data["DEA{}_resistance".format(i + 1)] = resistance[i]
+                data["DEA{}_resistance".format(disp_id)] = resistance[i]
             if strain_AXYa is not None and i < strain_AXYa.shape[0]:
-                data["DEA{}_strain_area".format(i + 1)] = strain_AXYa[i, 0]
-                data["DEA{}_strain_X".format(i + 1)] = strain_AXYa[i, 1]
-                data["DEA{}_strain_Y".format(i + 1)] = strain_AXYa[i, 2]
-                data["DEA{}_strain_average".format(i + 1)] = strain_AXYa[i, 3]
+                data["DEA{}_strain_area".format(disp_id)] = strain_AXYa[i, 0]
+                data["DEA{}_strain_X".format(disp_id)] = strain_AXYa[i, 1]
+                data["DEA{}_strain_Y".format(disp_id)] = strain_AXYa[i, 2]
+                data["DEA{}_strain_average".format(disp_id)] = strain_AXYa[i, 3]
             if center_shift is not None and i < center_shift.shape[0]:
-                data["DEA{}_center_X".format(i + 1)] = center_shift[i, 0]
-                data["DEA{}_center_Y".format(i + 1)] = center_shift[i, 1]
+                data["DEA{}_center_X".format(disp_id)] = center_shift[i, 0]
+                data["DEA{}_center_Y".format(disp_id)] = center_shift[i, 1]
 
         if image_saved:
             data["imagefile"] = timestamp.strftime("%Y%m%d-%H%M%S")  # same as in image file name, to help find it

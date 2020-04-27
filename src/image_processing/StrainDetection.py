@@ -56,7 +56,7 @@ class StrainDetector:
         :param imgs: A set of images (1 image per DEA)
         :param output_result_image: if True, the function returns a visualisation of the measured strain
         :param check_visual_state: Checks if any image has deviated too much from its reference
-        :param title: A title to print on the result image
+        :param title: A title to print on the result image. Can be a list of titles, one for each result image.
         :return: four object containing the strain, center shift, result images, and visual_state for each of the
         n input images. 'strain' is a n-by-4 array with the following columns:
         [area strain, radial strain X, radial strain Y, average radial strain (sqrt of area strain)]
@@ -152,12 +152,15 @@ class StrainDetector:
             if masks[i] is not None:
                 self._exclude_masks[i] = masks[i]
 
+        if isinstance(title, str):
+            title = [title] * n_img  # make into a list with the same title for each image
+
         res_imgs = None
         if output_result_image:
             # create a list of flags indicating the DEA state (as determined visually) or non to disable the indicator
             res_imgs = [visualize_result(imgs[i], ellipses[i], tuple(xy_radii[i, :]), tuple(self.query_angles),
-                                         self._reference_ellipses[i], strain_all[i, -1], title=title)
-                        for i in range(len(imgs))]
+                                         self._reference_ellipses[i], strain_all[i, -1], title=title[i])
+                        for i in range(n_img)]
 
         return strain_all, center_shift, res_imgs, visual_state
 

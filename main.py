@@ -208,7 +208,8 @@ class NERD:
 
         # TODO: set switching mode in DC mode
         # TODO: enable only active channels, once this is supported by the switchboard
-        self.hvps.set_relay_auto_mode()  # enable auto mode by default
+        self.hvps.set_relay_auto_mode()  # enable relay auto mode for automatic short detection. Opens all channels.
+        self.hvps.set_switching_mode(1)  # start in DC mode
 
         while self.shutdown_flag is not True:
             now = time.perf_counter()
@@ -349,10 +350,12 @@ class NERD:
                     time_measurement_started = None
 
                 # ------------------------------
-                # Record data: images, TODO: resistance, current
+                # Record data: images, resistance, TODO: current
                 # ------------------------------
 
-                # voltage and state are recorded on each cycle anyway.
+                # record voltage and state again since there may be some delay since last time, and it can't hurt
+                measuredVoltage = self.hvps.get_current_voltage()
+                el_state = self.hvps.get_relay_state()
                 self.logging.info("Current voltage: {} V".format(measuredVoltage))
                 self.logging.info("DEA state: {}".format(el_state))
 
@@ -361,7 +364,8 @@ class NERD:
                 # use timestamp of the last image for the whole set so they have a realistic and matching timestamp
                 # timestamp = cap.get_timestamps(cap.get_camera_count() - 1)
 
-                Rdea = self.daq.measure_DEA_resistance(self.active_deas, n_measurements=1, nplc=1)
+                Rdea = self.daq.measure_DEA_resistance(self.active_deas, n_measurements=1, nplc=5)  # 1-D numpy array
+                self.logging.info("Resistance [kΩ]: {}".format(Rdea / 1000))
 
                 # --- resume cycling if in AC mode -------------------------------------
                 if current_state == STATE_WAITING_HIGH and ac_mode:
@@ -379,12 +383,15 @@ class NERD:
                     duration_at_max_V += measurement_duration / 2
 
                 # ------------------------------
-                # Analyze data (strain) TODO: resistance, current?
+                # Analyze data: strain, TODO: current(resistance needs no analysis)
                 # ------------------------------
 
-                # measure strain
-                vs = "{} V".format(measuredVoltage)
-                strain, center_shifts, res_imgs, vis_state = self.strain_detector.get_dea_strain(imgs, True, True, vs)
+                # compile labels to print on the result images (showing voltage and resistance)
+                Rlist_kohm = (np.round(Rdea / 100) / 10).tolist()  # convert to kOhm with one decimal place
+                res_img_labels = ["{} V   {} kOhm".format(measuredVoltage, r) for r in Rlist_kohm]
+                # measure strain and get result images
+                strain_res = self.strain_detector.get_dea_strain(imgs, True, True, res_img_labels)
+                strain, center_shifts, res_imgs, vis_state = strain_res
                 # print average strain for each DEA
                 self.logging.info("strain [%]: {}".format(np.reshape(strain[:, -1], (1, -1))))
 
@@ -407,6 +414,7 @@ class NERD:
                                  vis_state,
                                  strain,
                                  center_shifts,
+                                 Rdea,
                                  image_saved=image_due)
 
                 time_last_measurement = now
@@ -426,10 +434,11 @@ class NERD:
                 # -----------------------
                 # show images
                 # -----------------------
-                disp_imgs = [cv.resize(ImageCapture.ImageCapture.IMG_NOT_AVAILABLE, preview_image_size)] * 6
+                disp_imgs = [cv.resize(ImageCapture.ImageCapture.IMG_NOT_AVAILABLE, preview_image_size,
+                                       interpolation=cv.INTER_AREA)] * 6
                 for i in range(6):
                     if len(res_imgs) > i and res_imgs[i] is not None:
-                        disp_imgs[i] = cv.resize(res_imgs[i], preview_image_size)
+                        disp_imgs[i] = cv.resize(res_imgs[i], preview_image_size, interpolation=cv.INTER_AREA)
 
                 sep = np.zeros((preview_image_size[1], 3, 3), dtype=np.uint8)
                 row1 = np.concatenate((disp_imgs[0], sep, disp_imgs[1], sep, disp_imgs[2]), axis=1)
@@ -449,9 +458,10 @@ class NERD:
                     self.logging.debug("Failed to set voltage")
 
                 if new_state == STATE_WAITING_HIGH and ac_mode:
-                    cycles_remaining = ac_cycle_count  # reset remaining cycles to the requested number cycles
-                    self.hvps.set_cycle_number(cycles_remaining)
+                    self.hvps.set_cycle_number(ac_cycle_count)  # set the requested number cycles
                     self.hvps.set_switching_mode(2)
+                else:
+                    self.hvps.set_switching_mode(1)  # anything but high phase in AC mode requires DC
 
                 current_state = new_state
                 current_step = new_step

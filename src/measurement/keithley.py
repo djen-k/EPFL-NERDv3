@@ -205,7 +205,7 @@ class DAQ6510:
         precedence over this parameter.
         :param nplc: The duration of each individual measurement in number of power line cycles (PLCs).
         If None, aperture (in seconds) is used instead. Otherwise nplc takes precedence.
-        :return: A list of resistance values (one for each DEA)
+        :return: A 1-D numpy array of resistance values (one for each DEA)
         """
         n_deas = len(deas)
         if n_deas == 0:
@@ -282,7 +282,7 @@ class DAQ6510:
         # print("Resistances: [DEA0, DEA1, ...] in kΩ")
         # print(RDEA / 1000)
 
-        return list(np.mean(RDEA, axis=0))
+        return np.mean(RDEA, axis=0)
 
     def calibrate_clock(self):
         """
