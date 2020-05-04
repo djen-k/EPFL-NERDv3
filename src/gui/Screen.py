@@ -13,7 +13,7 @@ def get_max_size(original_size, bounding_box, tiles=(1, 1), upscaling=False):
     :param bounding_box: The bounding box in which to fit the scaled image (width, height)
     :param tiles: The number of tiles of the image that need to fit into the bounding box (rows, columns)
                   Default is (1, 1), i.e. single image with no tiling.
-    :param upscaling: Wether or not the output size is alowwed to be larger than the original size. Default: False
+    :param upscaling: Whether or not the output size is alowed to be larger than the original size. Default: False
     :return: The recommended size of the image (width, height) so it will fit in the bounding box
     """
     total_width = original_size[0] * tiles[1]
@@ -41,7 +41,7 @@ def get_max_size_on_screen(image_size, tiles=(1, 1), margin=(0, 0), upscaling=Fa
                   Default is (1, 1), i.e. single image with no tiling.
     :param margin: A margin by which the output size is smaller than the screen size (width_margin, height_margin).
                    (0, 0) for fullscreen
-    :param upscaling: Wether or not the output size is alowwed to be larger than the original size. Default: False
+    :param upscaling: Whether or not the output size is alowed to be larger than the original size. Default: False
     :return: The recommended size of the image (width, height) so it will fit on the primary screen
     """
     screen = get_screen_resolution()
