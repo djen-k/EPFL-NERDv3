@@ -30,7 +30,8 @@ class DataSaver:
 
         # create data fields and header
         self.dataFields = ["timestamp", "elapsed_time", "time_at_max_V",
-                           "test_state", "target_voltage", "measured_voltage"]
+                           "test_state", "target_voltage", "measured_voltage",
+                           "leakage_current", "partial_discharge_freq", "partial_discharge_mag"]
 
         for i in active_deas:
             i += 1  # switch to 1-based indexing for user output
@@ -48,7 +49,7 @@ class DataSaver:
 
         # define units
 
-        self.units = ["[datetime]", "[s]", "[s]", "[0: Ramp, 1: High, 2: Low]", "[V]", "[V]"]
+        self.units = ["[datetime]", "[s]", "[s]", "[0: Ramp, 1: High, 2: Low]", "[V]", "[V]", "[A]", "[1/s]", "[A]"]
         for i in active_deas:
             self.units.append("[1: OK, 0: Failed]")
             self.units.append("[1: OK, 0: Failed]")
@@ -75,7 +76,7 @@ class DataSaver:
 
     def write_data(self, timestamp, elapsed_time, time_at_max_V, test_state, target_voltage, measured_voltage,
                    electrical_state=None, visual_state=None, strain_AXYa=None, center_shift=None, resistance=None,
-                   image_saved=False):
+                   leakage_current=None, pd_freq=None, pd_mag=None, image_saved=False):
 
         data = self.getDictField()
 
@@ -85,6 +86,13 @@ class DataSaver:
         data["test_state"] = test_state
         data["target_voltage"] = target_voltage
         data["measured_voltage"] = measured_voltage
+
+        if leakage_current is not None:
+            data["leakage_current"] = leakage_current
+        if leakage_current is not None:
+            data["partial_discharge_freq"] = pd_freq
+        if leakage_current is not None:
+            data["partial_discharge_mag"] = pd_mag
 
         for i in range(len(self.active_deas)):
             disp_id = self.active_deas[i] + 1

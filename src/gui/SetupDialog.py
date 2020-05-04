@@ -1,7 +1,6 @@
 import logging
 import math
 import os
-import time
 
 import cv2
 from PyQt5 import QtWidgets, QtGui
@@ -10,6 +9,7 @@ from PyQt5.QtCore import Qt
 from src.gui import QtImageTools, Screen
 from src.hvps.Switchboard import SwitchBoard
 from src.image_processing import ImageCapture, StrainDetection
+from src.measurement.keithley import DAQ6510
 
 
 class SetupDialog(QtWidgets.QDialog):
@@ -33,6 +33,7 @@ class SetupDialog(QtWidgets.QDialog):
         n_cols = 3
 
         self.com_ports = []
+        self.daq_ids = []
 
         # self._preview_img_size = [640, 360]  # [720, 405]  # [800, 450]
         img_size = [1920, 1080]
@@ -46,7 +47,8 @@ class SetupDialog(QtWidgets.QDialog):
         self._strain_detector = None  # will be set when a reference is recorded
         self.n_cams = 0  # we don't know of any available cameras yet
 
-        self._hvps = SwitchBoard()
+        self._hvps = SwitchBoard()  # create switchboard instance. not connected yet
+        self._daq = DAQ6510()  # create DAQ instance. not yet connected
 
         # return values
         self._camorder = [-1] * n_deas
@@ -71,23 +73,54 @@ class SetupDialog(QtWidgets.QDialog):
         formLay = QtWidgets.QFormLayout()
         formLay.setLabelAlignment(Qt.AlignRight)
 
+        # Switchboard ####################################
+
         # add combo box to select the COM port
-        self.cbb_port_name = QtWidgets.QComboBox()
-        self.cbb_port_name.currentTextChanged.connect(self.cbb_comport_changed)
+        self.cbb_switchboard = QtWidgets.QComboBox()
+        self.cbb_switchboard.currentTextChanged.connect(self.cbb_comport_changed)
 
         # button to refresh com ports
-        self.btn_refresh_com = QtWidgets.QPushButton("Refresh")
+        self.btn_refresh_com = QtWidgets.QPushButton("Refresh COM")
         self.btn_refresh_com.clicked.connect(self.refresh_comports)
 
         # label to show what switchboard we're connected to
-        self.lbl_switcbox_status = QtWidgets.QLabel("nothing")
+        self.lbl_switchboard_status = QtWidgets.QLabel("no switchboard")
 
-        formLay.addRow("Switchboard:", self.cbb_port_name)
-        formLay.addRow("Connected to:", self.lbl_switcbox_status)
+        formLay.addRow("Switchboard:", self.cbb_switchboard)
+        formLay.addRow("Status:", self.lbl_switchboard_status)
         formLay.addRow("", self.btn_refresh_com)
 
+        separator = QtWidgets.QFrame()
+        separator.setFrameShape(QtWidgets.QFrame.HLine)
+        separator.setFrameShadow(QtWidgets.QFrame.Sunken)
+        formLay.addRow(" ", separator)
+
+        # Multimeter ########################################
+
+        # add combo box to select the COM port
+        self.cbb_daq = QtWidgets.QComboBox()
+        self.cbb_daq.currentTextChanged.connect(self.cbb_daq_changed)
+
+        # button to refresh com ports
+        self.btn_refresh_daq = QtWidgets.QPushButton("Refresh VISA")
+        self.btn_refresh_daq.clicked.connect(self.refresh_multimeters)
+
+        # label to show what switchboard we're connected to
+        self.lbl_daq_status = QtWidgets.QLabel("no multimeter")
+
+        formLay.addRow("Multimeter:", self.cbb_daq)
+        formLay.addRow("Status:", self.lbl_daq_status)
+        formLay.addRow("", self.btn_refresh_daq)
+
+        separator = QtWidgets.QFrame()
+        separator.setFrameShape(QtWidgets.QFrame.HLine)
+        separator.setFrameShadow(QtWidgets.QFrame.Sunken)
+        formLay.addRow(" ", separator)
+
+        # Test parameters ########################################
+
         # create voltage selector
-        self.num_voltage = self.create_num_selector(50, 5000, "voltage", 1000)
+        self.num_voltage = self.create_num_selector(0, 5000, "voltage", 1000)
         formLay.addRow("Voltage [V]:", self.num_voltage)
 
         # toggle button to apply voltage (to check strain detection results)
@@ -269,6 +302,7 @@ class SetupDialog(QtWidgets.QDialog):
         ##############################################################################
 
         self.refresh_comports()  # fill with available ports
+        self.refresh_multimeters()  # fill with available multimeters
 
         # self.setWindowFlags(Qt.Window)
         self.show()
@@ -318,7 +352,7 @@ class SetupDialog(QtWidgets.QDialog):
                                           QtWidgets.QMessageBox.Ok)
             return
 
-        if self.cbb_port_name.currentText() == "":
+        if self.cbb_switchboard.currentText() == "":
             QtWidgets.QMessageBox.warning(self, "No Switchboard/HVPS specified",
                                           "To start a measurement, please select a switchboard/HVPS!",
                                           QtWidgets.QMessageBox.Ok)
@@ -331,40 +365,84 @@ class SetupDialog(QtWidgets.QDialog):
         self.updateCycles()
 
     def refresh_comports(self):
-        self.cbb_port_name.blockSignals(True)  # block signals to avoid excessive reconnecting to the switchboard
-        self.cbb_port_name.clear()  # remove all items
+        self.cbb_switchboard.blockSignals(True)  # block signals to avoid excessive reconnecting to the switchboard
+        self.cbb_switchboard.clear()  # remove all items
+
         # list all available com ports
         ports = self._hvps.detect()
         display_names = ["{} ({})".format(p.name.decode("ASCII"), p.port) for p in ports]
         port_names = [p.port for p in ports]
-        self.cbb_port_name.addItems(display_names)
+        print(display_names)
+        self.cbb_switchboard.addItems(display_names)
 
         # select the default COM port, if it is available
         if "com_port" in self._defaults and self._defaults["com_port"] in port_names:
             idx = port_names.index(self._defaults["com_port"])
-            if idx != self.cbb_port_name.currentIndex():  # only set if the index is different to avoid reconnect
-                self.cbb_port_name.setCurrentIndex(idx)
+            if idx != self.cbb_switchboard.currentIndex():  # only set if the index is different to avoid reconnect
+                self.cbb_switchboard.setCurrentIndex(idx)
         # if no default or default not available --> use index 0 which is selected by default
 
         self.com_ports = port_names
 
-        self.cbb_port_name.blockSignals(False)  # turn signals back on
+        self.cbb_switchboard.blockSignals(False)  # turn signals back on
         self.cbb_comport_changed()  # call comport changed once to connect to the newly selected com port
 
     def cbb_comport_changed(self):
-        # if self._hvps.is_open:
-        #     self.close()
-
         try:
-            port_idx = self.cbb_port_name.currentIndex()
-            self._hvps.open(port_idx)
-            self.lbl_switcbox_status.setText("Connected")
-            self.btn_apply_voltage.setEnabled(True)
+            port_idx = self.cbb_switchboard.currentIndex()
+            print(port_idx)
+            if port_idx < 0:
+                self.lbl_switchboard_status.setText("No switchboard found!")
+                self.btn_apply_voltage.setEnabled(False)
+                self.btn_apply_voltage.setChecked(False)
+            else:
+                self._hvps.open(port_idx, connection_timeout=0)
+                self.lbl_switchboard_status.setText("Connected")
+                self.btn_apply_voltage.setEnabled(True)
         except Exception as ex:
             self.logging.debug("Could not connect to switchboard: {}".format(ex))
-            self.lbl_switcbox_status.setText("Connection failed!")
+            self.lbl_switchboard_status.setText("Connection failed!")
             self.btn_apply_voltage.setEnabled(False)
             self.btn_apply_voltage.setChecked(False)
+
+    def refresh_multimeters(self):
+        self.cbb_daq.blockSignals(True)  # block signals to avoid excessive reconnecting
+        self.cbb_daq.clear()  # remove all items
+        self.cbb_daq.addItem("None")  # always add None as the first option
+
+        # list all available DAQs
+        instruments = self._daq.list_instruments()
+        display_names = [res_info.alias for res_info in instruments.values()]
+        self.daq_ids = list(instruments.keys())
+        self.cbb_daq.addItems(display_names)
+
+        # select the default DAQ, if it is available
+        if self.daq_ids:
+            if "daq_id" in self._defaults and self._defaults["daq_id"] in self.daq_ids:
+                idx = self.daq_ids.index(self._defaults["daq_id"])
+                if idx != self.cbb_daq.currentIndex():  # only set if the index is different to avoid reconnect
+                    self.cbb_daq.setCurrentIndex(idx)
+            else:
+                self.cbb_daq.setCurrentIndex(1)  # set to first DAQ (index 0 is "None")
+
+        self.cbb_daq.blockSignals(False)  # turn signals back on
+        self.cbb_daq_changed()  # call DAQ changed once to connect to the newly selected com port
+
+    def cbb_daq_changed(self):
+        daq_idx = self.cbb_daq.currentIndex()
+        if daq_idx <= 0:  # "None"
+            self._daq.disconnect()
+            self.lbl_daq_status.setText("Disconnected")
+            self._defaults["daq_id"] = "None"  # update default so refresh won't reset selection
+        else:
+            daq_id = self.daq_ids[daq_idx - 1]  # -1 because 0 in ComboBox is "None"
+            success = self._daq.connect(daq_id)
+            if success:
+                self.lbl_daq_status.setText("Connected")
+                self._defaults["daq_id"] = daq_id  # update default so refresh won't reset selection
+            else:
+                self.logging.debug("Could not connect to instrument: {}".format(daq_id))
+                self.lbl_daq_status.setText("Connection failed!")
 
     def btnAdjustClicked(self):
         self.logging.debug("clicked adjust")
@@ -427,23 +505,29 @@ class SetupDialog(QtWidgets.QDialog):
                                           QtWidgets.QMessageBox.Ok)
 
     def btnVoltageClicked(self):
-
+        # TODO: check that SB is actually connected! And add timeout to HVPS!
         if self._hvps is not None:
-            if self.btn_apply_voltage.isChecked():
-                # turn on and set voltage
-                self._hvps.set_switching_mode(1)  # set to DC mode
-                self._hvps.set_relay_auto_mode()
-                self._hvps.set_voltage(self.num_voltage.value(), block_if_testing=True)
-                self.btn_apply_voltage.setText("Turn voltage off!")
-                self.btn_apply_voltage.setStyleSheet("QPushButton{ color: red }")
-            else:
-                self._hvps.set_switching_mode(0)
-                self._hvps.set_voltage(0, block_if_testing=True)
-                self._hvps.set_relays_off()
-                self.btn_apply_voltage.setText("Apply voltage now!")
-                self.btn_apply_voltage.setStyleSheet("QPushButton{ color: black }")
-
-            time.sleep(3)
+            try:
+                if self.btn_apply_voltage.isChecked():
+                    # turn on and set voltage
+                    self._hvps.set_switching_mode(1)  # set to DC mode
+                    self._hvps.set_relay_auto_mode()
+                    v = self.num_voltage.value()
+                    self._hvps.set_voltage(round(v * 0.7), block_until_reached=True)
+                    self._hvps.set_voltage(round(v * 0.9), block_until_reached=True)
+                    self._hvps.set_voltage(v, block_until_reached=True)
+                    self.btn_apply_voltage.setText("Turn voltage off!")
+                    self.btn_apply_voltage.setStyleSheet("QPushButton{ color: red }")
+                else:
+                    self._hvps.set_switching_mode(0)
+                    self._hvps.set_voltage(0, block_until_successful=True)
+                    self._hvps.set_relays_off()
+                    self.btn_apply_voltage.setText("Apply voltage now!")
+                    self.btn_apply_voltage.setStyleSheet("QPushButton{ color: black }")
+            except TimeoutError:
+                self.logging.warning("Unable to set voltage. Refreshing com ports to check connection.")
+                self.refresh_comports()
+            # time.sleep(3)
             # capture new images to show strain
             self.btnCaptureClicked()
         else:
@@ -602,8 +686,11 @@ class SetupDialog(QtWidgets.QDialog):
         Get sonfiguration for the NERD test as set in the SetupDialog
         :return: A config dict with all the parameters, as well as a strain detector with pre-set strain reference
         """
+        daq_ind = self.cbb_daq.currentIndex() - 1  # -1 because first is "None"
+        daq_id = self.daq_ids[daq_ind] if daq_ind >= 0 else "None"  # specifically selected no multimeter
         config = {
-            "com_port": self.com_ports[self.cbb_port_name.currentIndex()],
+            "com_port": self.com_ports[self.cbb_switchboard.currentIndex()],
+            "daq_id": daq_id,
             "cam_order": self.getCamOrder(),
             "voltage": self.num_voltage.value(),
             "steps": self.num_steps.value(),

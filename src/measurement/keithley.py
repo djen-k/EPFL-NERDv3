@@ -13,7 +13,13 @@ from src.image_processing import ImageCapture
 from src.image_processing.StrainDetection import StrainDetector
 
 
-def list_instruments(instrument_search_string=None, resource_manager=None):
+def list_visa_instruments(instrument_search_string=None, resource_manager=None):
+    """
+    Get a list of available VISA instruments.
+    :param instrument_search_string: A search string used to filter the results.
+    :param resource_manager: If specified, this resource manager is used. If None, a new resource manager is created.
+    :return: A dictionary, where the keys represent the device IDs and the values contain a device info object.
+    """
     if resource_manager is None:
         resource_manager = visa.ResourceManager()
     resources = resource_manager.list_resources_info(query='?*::INSTR')
@@ -41,62 +47,99 @@ def get_resistance_channels(deas):
 class DAQ6510:
     resistance_channels = ["103,104", "105,106", "107,108", "109,110", "117,118", "119,120"]
 
-    def __init__(self, instrument_id=None, instrument_search_string="6510"):
+    MODE_DEFAULT = 0  # default mode as after reset - no sensing method or channels selected
+    MODE_SENSE_RESISTANCE = 1
+    MODE_SENSE_CURRENT = 2
+    MODE_UNKNOWN = -1  # state of the DAQ is not known. Probably a good idea to do a reset.
+
+    def __init__(self, auto_connect=False):
         """
-        Create an instance of a DAQ6510 digital multimeter and connect to an instrument. No error is generated if
-        no instrument is found or the connection fails. Check 'is_connected()' to ensure that the instrument is
-        connected!
-        :param instrument_id: A VISA resource string specifying the desired instrument. If None, it automatically
-        connects to the first suitable instrument it finds.
-        :param instrument_search_string: If instrument_id is None, this is used to search for a suitable device.
+        Create an instance of a DAQ6510 digital multimeter and connect to an instrument.
+        :param auto_connect: If True, an attempt is made to connect to the first available instrument.
+        No error is generated if no instrument is found or the connection fails. Check 'is_connected()'
+        to see if an instrument is connected!
         """
         self.logging = logging.getLogger("DAQ6510")
 
         self.resource_manager = visa.ResourceManager()
         self.instrument = None
+        self.instrument_id = None
         self.instrument_name = None
         self.serial_number = None
         self.firmware_version = None
         self.data_format = False
+        self.mode = DAQ6510.MODE_UNKNOWN
 
-        if isinstance(instrument_id, str):  # full ID given, try to connect to it
-            success = self._connect(instrument_id)
-            if not success:  # no instrument was found
-                self.logging.critical("Unable to connect to the specified instrument: {}".format(instrument_id))
-        else:  # no ID given -> search for available instruments
-            available_instruments = list_instruments(instrument_search_string, self.resource_manager)
-            for res_id, res_info in available_instruments.items():
-                if self._connect(res_id):  # try connecting to instrument one at a time, stop if successful
-                    break
-
-            if self.instrument is None:  # no instrument was found
-                self.logging.critical("No instrument found! Make sure the DAQ6510 is connected via USB!")
+        if auto_connect is True:
+            self.connect()
 
     def __del__(self):
-        self._disconnect()
+        self.disconnect()
         del self.logging
 
-    def _connect(self, instrument_id, reset=True):
-        try:
-            self.logging.info("Connecting to instrument: {}".format(instrument_id))
-            self.instrument = self.resource_manager.open_resource(instrument_id)  # connect to instrument
-            self.instrument_id = instrument_id
-            if reset:
-                self.send_command("*RST")  # reset instrument to put it in a known state
+    def list_instruments(self):
+        """
+        Get a list of available DAQ6510 instruments.
+        :return: A dictionary of available instruments, containing pairs of device IDs and device info objects.
+        """
+        return list_visa_instruments(instrument_search_string="6510", resource_manager=self.resource_manager)
 
-            self.instrument.clear()  # clear input buffer to make sure we don't receive messages from a previous session
-            self._get_instrument_properties()
-            self.logging.info("Successfully connected to {}".format(self.get_instrument_description()))
-            return True  # return True if successful
-        except Exception as ex:
-            self.logging.warning("Unable to connect: {}".format(instrument_id, ex))
-            self.instrument = None
-            return False
+    def connect(self, instrument_id=None, reset=False):
+        """
+        Connect to a physical instrument.
+        :param instrument_id: A VISA resource string specifying the desired instrument. If None, it automatically
+        connects to the first suitable instrument it finds.
+        :param reset: If True (default), the istrument is reset upon connection
+        :return: True or False, indicating if connection was successful
+        """
 
-    def _disconnect(self):
+        if self.instrument is not None:  # already connected to a different device
+            if instrument_id is None or instrument_id == self.instrument_id:  # same device, no need to reconnect
+                self.logging.info("Already connected to {}".format(instrument_id))
+                return True
+            else:  # different device, need to disconnect first
+                self.disconnect()
+
+        if instrument_id is not None:  # ID given -> try to connect to to specified device
+            try:
+                self.logging.info("Connecting to instrument: {}".format(instrument_id))
+                self.instrument = self.resource_manager.open_resource(instrument_id)  # connect to instrument
+                self.instrument_id = instrument_id
+                if reset:
+                    self.reset()
+
+                self.instrument.clear()  # clear input buffer so we don't receive messages from a previous session
+                self._get_instrument_properties()
+                self.logging.info("Successfully connected to {}".format(self.get_instrument_description()))
+                return True  # return True if successful
+            except Exception as ex:
+                self.logging.warning("Unable to connect: {}".format(instrument_id, ex))
+                self.instrument = None
+                return False
+
+        else:  # no ID given -> look for available instruments
+            if self.instrument is None:
+                available_instruments = self.list_instruments()
+                for res_id, res_info in available_instruments.items():
+                    if self.connect(res_id):  # try connecting to instrument one at a time, stop if successful
+                        return True
+
+                if self.instrument is None:  # no instrument was found
+                    self.logging.critical("No instrument found! Make sure the DAQ6510 is connected via USB!")
+                    return False
+
+    def disconnect(self):
         if self.instrument:
-            self.logging.debug("Disconnecting...")
             self.instrument.close()
+            self.logging.debug("{} disconnected.".format(self.instrument_name))
+            # reset all fields
+            self.instrument = None
+            self.instrument_id = None
+            self.instrument_name = None
+            self.serial_number = None
+            self.firmware_version = None
+            self.data_format = False
+            self.mode = DAQ6510.MODE_UNKNOWN
 
     def is_connected(self):
         return self.instrument is not None
@@ -112,10 +155,17 @@ class DAQ6510:
         res = self.instrument.query(command)
         return res
 
+    def reset(self):
+        """
+        Reset the instrument to its default state by sending an 'RST' command.
+        """
+        self.send_command("*RST")  # reset instrument to put it in a known state
+        self.mode = DAQ6510.MODE_DEFAULT
+
     def set_timeout(self, timeout_s):
         """
-        Set read timeout in seconds. Any communication with the device that is aborted after the specified timeout if no
-        response was received.
+        Set read timeout in seconds. Any communication with the device that is aborted after the specified timeout if
+        no response was received.
         :param timeout_s: The timout in seconds after which to abort read operations
         """
         self.instrument.timout = timeout_s * 1000
@@ -217,7 +267,7 @@ class DAQ6510:
 
         scan_timeout = 1 * n_channels * n_measurements  # should never take more than 1 second per measurement
 
-        self.send_command("*RST")
+        # self.send_command("*RST")
         self.send_command("FUNC 'VOLT:DC', {}".format(str_channels))
         # daq.send_command("VOLT:DC:RANG:AUTO ON, {}".format(str_channels))
         self.send_command("VOLT:DC:RANGe 10, {}".format(str_channels))
@@ -230,6 +280,7 @@ class DAQ6510:
         self.send_command("AZERo:ONCE")  # zero once now before starting the scan
         self.send_command("ROUT:SCAN {}".format(str_channels))
         self.send_command("ROUT:SCAN:COUN:SCAN {}".format(n_measurements))
+        self.mode = DAQ6510.MODE_SENSE_RESISTANCE
 
         dt_start = datetime.now()
         self.send_command("INIT")
@@ -284,6 +335,41 @@ class DAQ6510:
 
         return np.mean(RDEA, axis=0)
 
+    def measure_current(self, nplc=1):
+        """
+        Take a single current measurement on channel 122. 9V5 supply to shunt resistors is switched off before the
+        measurement is taken.
+        :param nplc: The length of the measurement in number of power line cycles. Can be fractional.
+        1-5 PLCs gives the lowest noise according to the DAQ6510 manual.
+        :return: A single current reading in A.
+        """
+
+        if self.mode != DAQ6510.MODE_SENSE_CURRENT:  # only do setup if required
+            # there is only one current channel used, so ne need to  select different channels for now.
+            # self.send_command("*RST")  # make sure we start with default configuration
+            self.send_command("SENS:FUNC 'CURR:DC', (@122)")
+            # daq.send_command("SENS:CURR:DC:APERture 0.02, (@122)")
+            # measurement aperture of 1-2 power line cycles gives the lowest noise (according to DAQ manual)
+            self.send_command("SENS:CURR:DC:NPLC {}, (@122)".format(nplc))
+            self.send_command("SENS:CURR:DC:RANGe 100e-6, (@122)")
+            # daq.send_query("SENS:CURR:DC:APERture? (@122)")
+
+            self.send_command("ROUT:CLOSe (@122)")  # close relays on current measurement channel
+            # must close 122 first because it will open all other channels since it thinks they might interfere
+            self.send_command("ROUT:CLOSe (@112)")  # close relays 112, 113 to connect the relay on the resistance board
+            self.send_command("ROUT:CLOSe (@113)")  # this switches off the 9.5V power used for R measurements
+            time.sleep(1)  # wait for relay to switch and current to decay
+
+            self.mode = DAQ6510.MODE_SENSE_CURRENT
+
+        # perform a measurement
+        cur = float(self.send_query("READ?"))
+
+        # self.send_command("ROUT:OPEN (@112)")  # open relays 112 and 113 again to switch 9.5V back on
+        # self.send_command("ROUT:OPEN (@113)")
+
+        return cur
+
     def calibrate_clock(self):
         """
         Synchronize the clock between the computer and the multimeter by setting the multimeter time to the system time
@@ -291,6 +377,8 @@ class DAQ6510:
         :return: The offset, in fractional seconds, that must be added to the multimeter time in order to make it match
         the computer's system time as determined by datetime.now()
         """
+        # TODO: don't change system time of the DAQ! It gets applied with some delay and may occur during measurement
+        # TODO: get more precise estimate of the offset between the clocks somehow - this doesn't cut it!
         tstart = datetime.now()
         delay = 1 - tstart.microsecond / 1000000
         time.sleep(delay)  # wait until the next full second
@@ -333,9 +421,10 @@ def test_current_measurements():
 
     daq.send_command("*RST")
     daq.send_command("SENS:FUNC 'CURR:DC', (@122)")
-    daq.send_command("SENS:CURR:DC:APERture 0.02, (@122)")
+    # daq.send_command("SENS:CURR:DC:APERture 0.02, (@122)")
+    daq.send_command("SENS:CURR:DC:NPLC 1, (@122)")  # measure for one power line cycle to avoid the 50 Hz noise
     daq.send_command("SENS:CURR:DC:RANGe 100e-6, (@122)")
-    daq.send_query("SENS:CURR:DC:APERture? (@122)")
+    # daq.send_query("SENS:CURR:DC:APERture? (@122)")
     # daq.send_command("SENS:COUNt 10")
 
     daq.send_command("ROUT:CLOSe (@122)")  # close relays on current measurement channel

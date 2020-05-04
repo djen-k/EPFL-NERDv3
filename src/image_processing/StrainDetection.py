@@ -154,6 +154,8 @@ class StrainDetector:
 
         if isinstance(title, str):
             title = [title] * n_img  # make into a list with the same title for each image
+        elif len(title) == 1 and n_img > 1:
+            title = title * n_img  # if single string in list, duplicate to match number of images
 
         res_imgs = None
         if output_result_image:

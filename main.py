@@ -6,7 +6,7 @@ from datetime import datetime
 
 import cv2 as cv
 import numpy as np
-from PyQt5.QtWidgets import QMainWindow, QWidget, QVBoxLayout, QApplication
+from PyQt5.QtWidgets import QApplication
 
 from libs import duallog
 from src.fileio.DataSaver import DataSaver
@@ -16,50 +16,6 @@ from src.gui import SetupDialog, Screen
 from src.hvps.Switchboard import SwitchBoard
 from src.image_processing import ImageCapture, StrainDetection
 from src.measurement.keithley import DAQ6510
-
-
-class App(QMainWindow):
-    """
-    Main Window: root
-    """
-
-    def __init__(self, args):
-        print("Hello App")
-        super().__init__()
-        self.args = args
-        self.title = 'PowerNERD'
-        self.left = 0
-        self.top = 0
-        self.width = 2000
-        self.height = 800
-        self.setWindowTitle(self.title)
-        self.setGeometry(self.left, self.top, self.width, self.height)
-        self.mainW = MainWindow(self, args)
-        self.setCentralWidget(self.mainW)
-        self.show()
-
-    def closeEvent(self, event):
-        """
-        Handle user closing window
-        """
-        self.mainW.close()
-
-
-class MainWindow(QWidget):
-    """
-    THE main window widget. Includes everything else
-    """
-
-    def __init__(self, parent, args):
-        super(QWidget, self).__init__(parent)
-
-        self.args = args
-
-        # main window layout
-        self.layout = QVBoxLayout(self)
-
-        # logger
-        self.logging = logging.getLogger("mainWindow")
 
 
 def _setup():
@@ -116,11 +72,16 @@ class NERD:
             daq_id = self.config["daq_id"]
         else:
             daq_id = None  # --> find DAQ automatically
-        self.daq = DAQ6510([daq_id])
-        if not self.daq.is_connected():
-            msg = "Unable to connect to multimeter!"
-            self.logging.error(msg)
-            raise Exception(msg)
+
+        if daq_id == "None":  # explicitly no multimeter selected by user
+            self.logging.info("Running NERD test without multimeter.")
+            self.daq = None
+        else:
+            self.daq = DAQ6510()
+            daq_connected = self.daq.connect(daq_id)
+            if not daq_connected:
+                self.logging.warning("Unable to connect to multimeter! Running test without multimeter.")
+                self.daq = None
 
         # init some internal variable
         self.shutdown_flag = False
@@ -169,7 +130,7 @@ class NERD:
         min_voltage = 300
         # TODO: check why min voltage is 300 V (officially 50, but doesn't always seem to work)
         nsteps = self.config["steps"]
-        voltage_step = max_voltage / nsteps
+        voltage_step = max_voltage / nsteps  # can be fractional, will be rounded when voltage is set
 
         duration_low_s = self.config["low_duration_s"]
         duration_high_s = self.config["high_duration_min"] * 60  # convert to seconds
@@ -195,7 +156,15 @@ class NERD:
         current_state = STATE_STARTUP  # start with a ramp
         current_step = 0
         current_target_voltage = 0
+        measured_voltage = 0
         prev_V_high = False
+        Rdea = None
+        leakage_current = None
+        leakage_cur_avg = None
+        leakage_buf = []
+        dea_state_el = None  # previous electrical state - to check if a DEA failed
+        breakdown_occurred = False
+        failed_deas = []
 
         # record start time
         now = time.perf_counter()
@@ -262,8 +231,8 @@ class NERD:
                 if dt_state_change > step_duration_s:
                     new_step = current_step + 1
                     new_target_voltage = round(new_step * voltage_step)
-                    # make sure we
-                    while new_target_voltage < min_voltage:
+                    # keep increasing step-wise until we are above the min voltage
+                    while new_target_voltage < min_voltage and new_step <= nsteps:
                         new_step += 1  # increase step
                         new_target_voltage = round(new_step * voltage_step)
                     if new_step > nsteps:
@@ -292,27 +261,31 @@ class NERD:
                 self.logging.debug(msg.format(current_state, current_step, new_state, new_step))
 
             dt_measurement = now - time_last_measurement  # time since last state change
-            measurement_due = dt_measurement > measurement_period_s or state_changing
+            measurement_due = dt_measurement > measurement_period_s or state_changing or breakdown_occurred
+            # if breakdown occurred last cycle, we also want a measurement now so we have before and after
             # self.logging.debug("Time since last measurement: {} s,  measurement due: {}".format(dt_measurement,
             #                                                                                     measurement_due))
 
             dt_image_saved = now - time_last_image_saved  # time since last state change
-            image_due = dt_image_saved > image_capture_period_s or state_changing
+            image_due = dt_image_saved > image_capture_period_s or state_changing or breakdown_occurred
+            # breakdown_occurred will be true here if the breakdown happened last cycle.
+            # Thus, the next image after breakdown is also stored
             # self.logging.debug("Time since last image saved: {} s,  New image required: {}".format(dt_image_saved,
             #                                                                                        image_due))
 
             ####################################################################
-            # pause test if switchboard is checking for shorts
+            # pause test if switchboard is checking for shorts, then check if a breakdown occurred
             ####################################################################
 
-            el_state = self.hvps.get_relay_state()
-            if el_state[0] == 2:  # switchboard is testing
+            # TODO: make sure switchboard is still working correctly after a reconnect
+            dea_state_el_new = self.hvps.get_relay_state()
+            if dea_state_el_new[0] == 2:  # switchboard is testing
                 self.logging.info("Switchboard is testing for short circuits. NERD test paused...")
 
                 # wait for check to be over
                 time_pause_started = time.perf_counter()
-                while el_state[0] == 2:
-                    el_state = self.hvps.get_relay_state()
+                while dea_state_el_new[0] == 2:
+                    dea_state_el_new = self.hvps.get_relay_state()
                     time.sleep(0.01)
 
                 # extend time until next state change/measurement/image by the duration of the test
@@ -322,25 +295,55 @@ class NERD:
                 time_last_image_saved += pause_duration
                 time_last_voltage_measurement += pause_duration
 
+                self.logging.info("Short circuit detection finished: {} Resuming test.".format(dea_state_el_new))
+
+            # check which samples broke down
+            if dea_state_el is not None:
+                failed_deas = np.nonzero(np.array(dea_state_el_new) - np.array(dea_state_el))
+                failed_deas = failed_deas[0]  # np.nonzero returns tuple - we only want the first value
+                breakdown_occurred = len(failed_deas) > 0
+
+            if breakdown_occurred:
+                self.logging.info("Breakdown detected! DEAs: {}".format(failed_deas))
+                image_due = True
+            else:  # no breakdown, so we don't need the prev state anymore. If breakdown we record the prev state first
+                dea_state_el = dea_state_el_new
+
             ###########################################################################
             # Measurements
             ###########################################################################
 
-            # measure voltage and record time spent at high voltage
-            measuredVoltage = self.hvps.get_current_voltage()
-            V_high = abs(measuredVoltage - max_voltage) < 50  # 50 V margin around max voltage counts as high
-            if V_high and prev_V_high:
-                if current_state == STATE_WAITING_HIGH and ac_mode:
-                    duration_at_max_V += (now - time_last_voltage_measurement) / 2  # if AC, it's only on half the time
-                else:
-                    duration_at_max_V += now - time_last_voltage_measurement
-            time_last_voltage_measurement = now
-            prev_V_high = V_high
+            # First: fast measurements that are carried out every cycle ###################
 
-            if measurement_due:
+            if not breakdown_occurred:  # don't record new data so we can save last data from before the breakdown
+
+                # measure voltage
+                measured_voltage = self.hvps.get_current_voltage(from_buffer_if_available=True)
+
+                # measure leakage current
+                if self.daq is not None:
+                    leakage_current = self.daq.measure_current(nplc=5)  # measure total current for n power line cycles
+                    leakage_buf.append(leakage_current)  # append to buffer so we can average when we write the data
+
+                # capture images
+                self.image_cap.grab_images()  # tell each camera to grab a frame - will only be retrieved if needed
+
+                # record time spent at high voltage
+                V_high = abs(measured_voltage - max_voltage) < 50  # 50 V margin around max voltage counts as high
+                if V_high and prev_V_high:
+                    if current_state == STATE_WAITING_HIGH and ac_mode:
+                        duration_at_max_V += (now - time_last_voltage_measurement) / 2  # if AC, only on half the time
+                    else:
+                        duration_at_max_V += now - time_last_voltage_measurement
+                time_last_voltage_measurement = now
+                prev_V_high = V_high
+            else:
+                leakage_cur_avg = leakage_current  # no averaging, just take last available reading before breakdown
+
+            if measurement_due and not breakdown_occurred:
 
                 # if in AC mode, switch to DC for the duration of the measurement
-                if current_state == STATE_WAITING_HIGH and ac_mode:
+                if current_state == STATE_WAITING_HIGH and ac_mode and not breakdown_occurred:
                     self.logging.debug("Suspended AC mode during measurement")
                     self.hvps.set_switching_mode(1)  # set to DC. number of completed cycles will be remembered
                     time_measurement_started = time.perf_counter()  # record how long AC was suspended
@@ -350,22 +353,29 @@ class NERD:
                     time_measurement_started = None
 
                 # ------------------------------
-                # Record data: images, resistance, TODO: current
+                # Record data: resistance, leakage current
                 # ------------------------------
+                # TODO: make all measurements fail-safe so the test continues running if any instrument fails
 
-                # record voltage and state again since there may be some delay since last time, and it can't hurt
-                measuredVoltage = self.hvps.get_current_voltage()
-                el_state = self.hvps.get_relay_state()
-                self.logging.info("Current voltage: {} V".format(measuredVoltage))
-                self.logging.info("DEA state: {}".format(el_state))
+                self.logging.info("Current voltage: {} V".format(measured_voltage))
+                self.logging.info("DEA state: {}".format(dea_state_el))
 
-                # get images
-                imgs = cap.read_images()
-                # use timestamp of the last image for the whole set so they have a realistic and matching timestamp
-                # timestamp = cap.get_timestamps(cap.get_camera_count() - 1)
+                if self.daq is not None:  # perform electrical measurements if possible
 
-                Rdea = self.daq.measure_DEA_resistance(self.active_deas, n_measurements=1, nplc=5)  # 1-D numpy array
-                self.logging.info("Resistance [kΩ]: {}".format(Rdea / 1000))
+                    # measure resistance
+                    Rdea = self.daq.measure_DEA_resistance(self.active_deas, n_measurements=1, nplc=3)  # 1-D np array
+                    self.logging.info("Resistance [kΩ]: {}".format(Rdea / 1000))
+
+                    # aggregate current measurements
+                    if ac_mode or len(leakage_buf) == 0:
+                        # can't use buffered measurements in AC mode since they might have been taken while switching
+                        self.logging.debug("no leakage measurements in buffer. recording new one...")
+                        leakage_current = self.daq.measure_current(nplc=3)  # take new measurement
+                        leakage_cur_avg = leakage_current  # nothing to average so we take the newly recorded measurement
+                    else:
+                        leakage_cur_avg = np.mean(leakage_buf)  # average all current readings since the last time
+                    leakage_buf = []  # reset buffer
+                    self.logging.info("Leakage current [nA]: {}".format(leakage_cur_avg * 1000000000))
 
                 # --- resume cycling if in AC mode -------------------------------------
                 if current_state == STATE_WAITING_HIGH and ac_mode:
@@ -382,23 +392,33 @@ class NERD:
                     measurement_duration = time_measurement_ended - time_measurement_started
                     duration_at_max_V += measurement_duration / 2
 
+            if measurement_due or breakdown_occurred:  # if breakdown, data from previous cycle is saved
                 # ------------------------------
-                # Analyze data: strain, TODO: current(resistance needs no analysis)
+                # Analyze data: images/strain, ... (current and resistance needs no analysis) TODO: partial discharge
                 # ------------------------------
 
                 # compile labels to print on the result images (showing voltage and resistance)
-                Rlist_kohm = (np.round(Rdea / 100) / 10).tolist()  # convert to kOhm with one decimal place
-                res_img_labels = ["{} V   {} kOhm".format(measuredVoltage, r) for r in Rlist_kohm]
+                label = "{}V".format(measured_voltage)
+                if leakage_cur_avg is not None:
+                    label += "  {}nA".format(round(leakage_cur_avg * 10000000000) / 10)  # convert to nA with 1 decimal
+                if Rdea is not None:
+                    R_kohm = np.round(Rdea / 100) / 10  # convert to kOhm with one decimal place
+                    res_img_labels = [label + "  {}kOhm".format(r) for r in R_kohm]
+                else:
+                    res_img_labels = [label] * self.n_dea
+
+                # retrieve the images that were grabbed earlier
+                imgs = cap.retrieve_images()[1]  # get only the images, not the success flags
                 # measure strain and get result images
                 strain_res = self.strain_detector.get_dea_strain(imgs, True, True, res_img_labels)
-                strain, center_shifts, res_imgs, vis_state = strain_res
+                strain, center_shifts, res_imgs, dea_state_vis = strain_res
                 # print average strain for each DEA
                 self.logging.info("strain [%]: {}".format(np.reshape(strain[:, -1], (1, -1))))
 
-                if 0 in vis_state:  # 0 means outlier, 1 means OK
+                if 0 in dea_state_vis:  # 0 means outlier, 1 means OK
                     self.logging.warning("Outlier detected")
 
-                for img, v, e in zip(res_imgs, vis_state, el_state):
+                for img, v, e in zip(res_imgs, dea_state_vis, dea_state_el):
                     StrainDetection.draw_state_visualization(img, v, e)
 
                 # ------------------------------
@@ -409,12 +429,13 @@ class NERD:
                                  duration_at_max_V,
                                  current_state,
                                  current_target_voltage,
-                                 measuredVoltage,
-                                 el_state,
-                                 vis_state,
+                                 measured_voltage,
+                                 dea_state_el,
+                                 dea_state_vis,
                                  strain,
                                  center_shifts,
                                  Rdea,
+                                 leakage_cur_avg,
                                  image_saved=image_due)
 
                 time_last_measurement = now
@@ -424,7 +445,7 @@ class NERD:
                 # -----------------------
                 if image_due:
                     # get image name suffix
-                    suffix = "{}V".format(measuredVoltage)  # store voltage in file name
+                    suffix = "{}V".format(measured_voltage)  # store voltage in file name
 
                     # save result images
                     imsaver.save_all(images=imgs, res_images=res_imgs, timestamp=now_tstamp, suffix=suffix)
@@ -447,13 +468,16 @@ class NERD:
                 disp_img = np.concatenate((row1, sep, row2), axis=0)
                 cv.imshow("NERD running... (press [q] to exit)", disp_img)
 
+            if breakdown_occurred:  # we still need to update the state with the latest one
+                dea_state_el = dea_state_el_new  # because we kept the previous state in memory in order to record it
+
             # ------------------------------
             # Apply state change and update voltage
             # ------------------------------
             if state_changing:
                 # set voltage for new state
                 current_target_voltage = new_target_voltage
-                ret = self.hvps.set_voltage(current_target_voltage, block_if_testing=True)
+                ret = self.hvps.set_voltage(current_target_voltage, block_until_successful=True)
                 if ret is not True:
                     self.logging.debug("Failed to set voltage")
 
@@ -483,7 +507,7 @@ class NERD:
 
         self.logging.critical("Exiting...")
         self.hvps.set_output_off()
-        self.hvps.set_voltage(0, block_if_testing=True)
+        self.hvps.set_voltage(0, block_until_successful=True)
         self.hvps.set_relays_off()
         del self.hvps
         self.logging.critical("Turned voltage off and disconnected relays")
