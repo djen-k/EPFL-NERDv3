@@ -505,17 +505,13 @@ class SetupDialog(QtWidgets.QDialog):
                                           QtWidgets.QMessageBox.Ok)
 
     def btnVoltageClicked(self):
-        # TODO: check that SB is actually connected! And add timeout to HVPS!
         if self._hvps is not None:
             try:
                 if self.btn_apply_voltage.isChecked():
                     # turn on and set voltage
                     self._hvps.set_switching_mode(1)  # set to DC mode
                     self._hvps.set_relay_auto_mode()
-                    v = self.num_voltage.value()
-                    self._hvps.set_voltage(round(v * 0.7), block_until_reached=True)
-                    self._hvps.set_voltage(round(v * 0.9), block_until_reached=True)
-                    self._hvps.set_voltage(v, block_until_reached=True)
+                    self._hvps.set_voltage_no_overshoot(self.num_voltage.value())
                     self.btn_apply_voltage.setText("Turn voltage off!")
                     self.btn_apply_voltage.setStyleSheet("QPushButton{ color: red }")
                 else:
@@ -629,54 +625,6 @@ class SetupDialog(QtWidgets.QDialog):
     def btnCaptureClicked(self):
         # TODO: protect against impatient clicks
         self.updateImages(self._image_capture.read_images(), self._image_capture.get_timestamps())
-
-    def btnNextClicked(self):
-        print("next")
-        self.btnStart.clicked.connect(self.accept)
-        # self._image_capture.read_images()
-        # # Get index of selected DEA, add it to the camOrderList and disable it form ComboBox
-        # if self.camSelW.currentText() != "Not used":
-        #     print("{}".format(self.camSelW.currentText()))
-        #     # selectedDea = int(self.camSelW.currentText().replace("DEA ", ""))
-        #     selectedDea = self.camSelW.currentText()
-        #     # self.camOrder.append(selectedDea)
-        #     self.camorder[selectedDea]=self.camIndex
-        #     self.initial_images[selectedDea] = self.imageReaderT.getAveragedImage()
-        #     self.mesh_coordinates[selectedDea] = self.getMeshCoordinates(self.imageReaderT.getAveragedImage())
-        #
-        #     self.camSelW.model().item(self.camSelW.currentIndex()).setEnabled(False)
-        #
-        #     # update counter for next acquisition
-        #     self.deaIndex += 1
-        #
-        #
-        # # If finished: hide everything and change button OnClick function to close dialog
-        # if self.deaIndex == (self.nbDea):
-        #     # Close image reader thread
-        #     self.deaIndex += 1
-        #     self.imageReaderT.close()
-        #
-        #
-        #     # Change layout to ask anything ang show "Finished"
-        #     self.nextBtnW.setText("Finish")
-        #     self.descTextW.hide()
-        #     self.title2W.setText("Finished: Order is: {}".format(self.camorder))
-        #     self.camSelW.hide()
-        #     self.ImageW.hide()
-        #
-        #     # Change button's OnClick function to finish dialog successfully
-        #     self.nextBtnW.clicked.connect(self.accept)
-        #
-        # # let's increment camera index counter for next camera
-        # self.camIndex+=1
-        #
-        # # ask thread for new image
-        # self.imageReaderT.waitImage()
-        # self.imageReaderT.changeIndex(self.camIndex)
-        # self.descTextW.setText("Camera with index {}".format(self.camIndex))
-        #
-        # # Preselect DEA for next
-        # self.camSelW.setCurrentIndex(self.camOrderDefault[self.camIndex])
 
     def getCamOrder(self):
         return [cb.currentIndex() - 1 for cb in self.cbb_camera_select]

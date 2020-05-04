@@ -10,6 +10,8 @@ from libs.hvps import HVPS, HvpsInfo
 
 class SwitchBoard(HVPS):
 
+    # TODO: always record current state and restore after reconnect!
+
     def __init__(self):
         super().__init__()
         self.logging = logging.getLogger("Switchboard")  # change logger to "Switchboard"
@@ -130,7 +132,7 @@ class SwitchBoard(HVPS):
         the function to block until the switchboard has finished testing (if it was). If false, the function
         may return without having set the voltage. Check response from switchboard!
         :param block_until_reached: Flag to indicate if the function should block until the measured voltage matches the
-        voltage set point (with a 50V margin). If the set point is not reached within 3s, a TimeoutError is raised.
+        voltage set point (with a 10V margin). If the set point is not reached within 3s, a TimeoutError is raised.
         :return: True if the voltage was set successfuly, false if the switchboard was unable to set the voltage because
         it was busy testing for a short circuit or some other error occurred. If 'block_if_testing' is True,
         a False return value indicates an unexpected error.
@@ -147,7 +149,7 @@ class SwitchBoard(HVPS):
             timeout = 3  # if voltage has not reached its set point in 3 s, something must be wrong!
             start = time.perf_counter()
             elapsed = 0
-            while abs(voltage - self.get_current_voltage()) > 50:
+            while abs(voltage - self.get_current_voltage()) > 10:
                 if elapsed > timeout:
                     raise TimeoutError("Voltage has not reached the set point after 3 seconds! Please check the HVPS!")
                 if elapsed == 0:  # only write message once
@@ -156,6 +158,20 @@ class SwitchBoard(HVPS):
                 elapsed = time.perf_counter() - start
 
         return ret == voltage
+
+    def set_voltage_no_overshoot(self, voltage):
+        """
+        Sets the output voltage to the specified value, but does so more slowly in several steps to ensure that there
+        is no voltage overshoot. This method blocks until the desired voltage has been reached.
+        :param voltage: The desired output voltage, in Volts.
+        :return: True or False to indicate if the voltage was set correctly.
+        """
+        v = self.get_current_voltage(from_buffer_if_available=True)
+        dv = voltage - v
+        if dv > 100:  # if increasing voltage (and by more than a few volts), do it slowly
+            self.set_voltage(round(voltage * 0.7), block_until_reached=True)
+            self.set_voltage(round(voltage * 0.9), block_until_reached=True)
+        return self.set_voltage(voltage, block_until_reached=True)
 
     def get_current_voltage(self, from_buffer_if_available=False):
         """
@@ -359,7 +375,30 @@ class SwitchBoard(HVPS):
         return times, voltages  # Return time and positions
 
 
-if __name__ == '__main__':
+def test_slow_voltage_rise():
+    import matplotlib.pyplot as plt
+
+    sb = SwitchBoard()
+    sb.open(with_continuous_reading=True)
+    sb.set_relays_on()
+    v = 300
+    # sb.set_voltage(round(v * 0.7), block_until_reached=True)
+    # # time.sleep(1)
+    # sb.set_voltage(round(v * 0.9), block_until_reached=True)
+    # sb.set_voltage(v, block_until_reached=True)
+    sb.set_voltage_no_overshoot(v)
+    time.sleep(1)
+    sb.set_voltage_no_overshoot(0)
+    sb.close()
+    times, voltages = sb.get_voltage_buffer()
+    plt.plot(times, voltages)
+    plt.xlabel("Time (s)")
+    plt.ylabel("Voltage (V)")
+    plt.grid(True)
+    plt.show()
+
+
+def test_switchboard():
     import matplotlib.pyplot as plt
 
     sb = SwitchBoard()
@@ -493,3 +532,8 @@ if __name__ == '__main__':
     # print(sb.get_current_voltage())
     # print(sb.get_voltage_setpoint())
     # print(sb.close())
+
+
+if __name__ == '__main__':
+    # test_switchboard()
+    test_slow_voltage_rise()

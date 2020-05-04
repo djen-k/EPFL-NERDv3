@@ -987,8 +987,8 @@ if __name__ == '__main__':
 
     # test_resistance_measurement()
     # test_current_measurements()
-    measure_resistance_sequence()
-    # test_digitize_current()
+    # measure_resistance_sequence()
+    test_digitize_current()
     # test_digitize_voltage()
     # test_time_synchronisation()
     # x = np.arange(100)

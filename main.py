@@ -424,6 +424,7 @@ class NERD:
                 # ------------------------------
                 # Save all data voltage and DEA state
                 # ------------------------------
+                # TODO: record total number of cycles in AC mode
                 saver.write_data(now_tstamp,
                                  now - time_started,
                                  duration_at_max_V,
@@ -477,7 +478,7 @@ class NERD:
             if state_changing:
                 # set voltage for new state
                 current_target_voltage = new_target_voltage
-                ret = self.hvps.set_voltage(current_target_voltage, block_until_successful=True)
+                ret = self.hvps.set_voltage_no_overshoot(current_target_voltage)
                 if ret is not True:
                     self.logging.debug("Failed to set voltage")
 
@@ -507,12 +508,13 @@ class NERD:
 
         self.logging.critical("Exiting...")
         self.hvps.set_output_off()
-        self.hvps.set_voltage(0, block_until_successful=True)
+        self.hvps.set_voltage(0, block_until_reached=True)
         self.hvps.set_relays_off()
-        del self.hvps
+        self.hvps.close()
         self.logging.critical("Turned voltage off and disconnected relays")
         saver.close()
         self.image_cap.close_cameras()
+        self.daq.disconnect()
 
 
 if __name__ == '__main__':
