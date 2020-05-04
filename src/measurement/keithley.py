@@ -61,7 +61,7 @@ class DAQ6510:
         """
         self.logging = logging.getLogger("DAQ6510")
 
-        self.resource_manager = visa.ResourceManager()
+        self.resource_manager = None
         self.instrument = None
         self.instrument_id = None
         self.instrument_name = None
@@ -82,7 +82,11 @@ class DAQ6510:
         Get a list of available DAQ6510 instruments.
         :return: A dictionary of available instruments, containing pairs of device IDs and device info objects.
         """
-        return list_visa_instruments(instrument_search_string="6510", resource_manager=self.resource_manager)
+        try:
+            return list_visa_instruments(instrument_search_string="6510", resource_manager=self.resource_manager)
+        except Exception as ex:
+            self.logging.warning("Unable to get a VISA instrument list: {}".format(ex))
+            return {}
 
     def connect(self, instrument_id=None, reset=False):
         """
@@ -102,6 +106,9 @@ class DAQ6510:
 
         if instrument_id is not None:  # ID given -> try to connect to to specified device
             try:
+                if self.resource_manager is None:
+                    self.resource_manager = visa.ResourceManager()
+
                 self.logging.info("Connecting to instrument: {}".format(instrument_id))
                 self.instrument = self.resource_manager.open_resource(instrument_id)  # connect to instrument
                 self.instrument_id = instrument_id
