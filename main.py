@@ -514,7 +514,6 @@ class NERD:
         self.logging.critical("Turned voltage off and disconnected relays")
         saver.close()
         self.image_cap.close_cameras()
-        self.daq.disconnect()
 
 
 if __name__ == '__main__':

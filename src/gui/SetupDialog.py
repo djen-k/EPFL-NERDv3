@@ -1,6 +1,7 @@
 import logging
 import math
 import os
+import time
 
 import cv2
 from PyQt5 import QtWidgets, QtGui
@@ -516,14 +517,14 @@ class SetupDialog(QtWidgets.QDialog):
                     self.btn_apply_voltage.setStyleSheet("QPushButton{ color: red }")
                 else:
                     self._hvps.set_switching_mode(0)
-                    self._hvps.set_voltage(0, block_until_successful=True)
+                    self._hvps.set_voltage(0, block_until_reached=True)
                     self._hvps.set_relays_off()
                     self.btn_apply_voltage.setText("Apply voltage now!")
                     self.btn_apply_voltage.setStyleSheet("QPushButton{ color: black }")
             except TimeoutError:
                 self.logging.warning("Unable to set voltage. Refreshing com ports to check connection.")
                 self.refresh_comports()
-            # time.sleep(3)
+            time.sleep(1)  # wait another second for DEA to respond
             # capture new images to show strain
             self.btnCaptureClicked()
         else:
