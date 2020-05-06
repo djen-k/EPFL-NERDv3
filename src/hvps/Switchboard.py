@@ -16,7 +16,7 @@ class SwitchBoard(HVPS):
         super().__init__()
         self.logging = logging.getLogger("Switchboard")  # change logger to "Switchboard"
         self.continuous_voltage_reading_flag = Event()
-        self.connection_timeout = 0
+        self.connection_timeout = -1
         self.t_0 = None
 
     def __del__(self):
@@ -258,7 +258,12 @@ class SwitchBoard(HVPS):
                 self.logging.debug("Connection error: {}".format(ex))
                 elapsed = time.perf_counter() - start
                 if self.connection_timeout < 0 or elapsed < self.connection_timeout:  # no timeout or not yet expired
-                    msg = "Reconnection attempt failed... will keep trying for {} s".format(self.connection_timeout)
+
+                    msg = "Reconnection attempt failed!"
+                    if self.connection_timeout == 0:
+                        msg += " Will keep trying for {} s".format(int(round(self.connection_timeout - elapsed)))
+                    else:
+                        msg += " Will keep trying..."
                     self.logging.critical(msg)
                     self.ser.close()  # close again to make sure it's properly closed before we try again
                     time.sleep(0.5)

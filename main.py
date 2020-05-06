@@ -78,7 +78,7 @@ class NERD:
             self.daq = None
         else:
             self.daq = DAQ6510()
-            daq_connected = self.daq.connect(daq_id)
+            daq_connected = self.daq.connect(daq_id, reset=True)
             if not daq_connected:
                 self.logging.warning("Unable to connect to multimeter! Running test without multimeter.")
                 self.daq = None
@@ -322,7 +322,7 @@ class NERD:
 
                 # measure leakage current
                 if self.daq is not None:
-                    leakage_current = self.daq.measure_current(nplc=5)  # measure total current for n power line cycles
+                    leakage_current = self.daq.measure_current(nplc=1)  # measure total current for n power line cycles
                     leakage_buf.append(leakage_current)  # append to buffer so we can average when we write the data
 
                 # capture images
@@ -363,15 +363,15 @@ class NERD:
                 if self.daq is not None:  # perform electrical measurements if possible
 
                     # measure resistance
-                    Rdea = self.daq.measure_DEA_resistance(self.active_deas, n_measurements=1, nplc=3)  # 1-D np array
+                    Rdea = self.daq.measure_DEA_resistance(self.active_deas, n_measurements=1, nplc=1)  # 1-D np array
                     self.logging.info("Resistance [kΩ]: {}".format(Rdea / 1000))
 
                     # aggregate current measurements
                     if ac_mode or len(leakage_buf) == 0:
                         # can't use buffered measurements in AC mode since they might have been taken while switching
                         self.logging.debug("no leakage measurements in buffer. recording new one...")
-                        leakage_current = self.daq.measure_current(nplc=3)  # take new measurement
-                        leakage_cur_avg = leakage_current  # nothing to average so we take the newly recorded measurement
+                        leakage_current = self.daq.measure_current(nplc=1)  # take new measurement
+                        leakage_cur_avg = leakage_current  # nothing to average -> take the newly recorded measurement
                     else:
                         leakage_cur_avg = np.mean(leakage_buf)  # average all current readings since the last time
                     leakage_buf = []  # reset buffer

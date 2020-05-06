@@ -88,7 +88,7 @@ class DAQ6510:
             self.logging.warning("Unable to get a VISA instrument list: {}".format(ex))
             return {}
 
-    def connect(self, instrument_id=None, reset=False):
+    def connect(self, instrument_id=None, reset=True):
         """
         Connect to a physical instrument.
         :param instrument_id: A VISA resource string specifying the desired instrument. If None, it automatically
@@ -128,7 +128,7 @@ class DAQ6510:
             if self.instrument is None:
                 available_instruments = self.list_instruments()
                 for res_id, res_info in available_instruments.items():
-                    if self.connect(res_id):  # try connecting to instrument one at a time, stop if successful
+                    if self.connect(res_id, reset):  # try connecting to instrument one at a time, stop if successful
                         return True
 
                 if self.instrument is None:  # no instrument was found
@@ -136,6 +136,7 @@ class DAQ6510:
                     return False
 
     def disconnect(self):
+        self.logging.debug("Disconnecting instrument")
         if self.instrument:
             self.instrument.close()
             self.logging.debug("{} disconnected.".format(self.instrument_name))
@@ -147,18 +148,22 @@ class DAQ6510:
             self.firmware_version = None
             self.data_format = False
             self.mode = DAQ6510.MODE_UNKNOWN
+        else:
+            self.logging.debug("No instrument was connected")
 
     def is_connected(self):
         return self.instrument is not None
 
     def send_command(self, command):
         if not self.is_connected():
-            raise Exception("No instrument available")
+            raise Exception("Not connected to any instrument")
+        self.logging.debug("Sending commend: {}".format(command))
         self.instrument.write(command)
 
     def send_query(self, command):
         if not self.is_connected():
-            raise Exception("No instrument available")
+            raise Exception("Not connected to any instrument")
+        self.logging.debug("Sending query: {}".format(command))
         res = self.instrument.query(command)
         return res
 
@@ -167,6 +172,7 @@ class DAQ6510:
         Reset the instrument to its default state by sending an 'RST' command.
         """
         self.send_command("*RST")  # reset instrument to put it in a known state
+        print("RESET")
         self.mode = DAQ6510.MODE_DEFAULT
 
     def set_timeout(self, timeout_s):
@@ -175,6 +181,7 @@ class DAQ6510:
         no response was received.
         :param timeout_s: The timout in seconds after which to abort read operations
         """
+        self.logging.debug("Sentting instrument timeout: {} s".format(timeout_s))
         self.instrument.timout = timeout_s * 1000
 
     def _get_instrument_properties(self):
@@ -188,10 +195,11 @@ class DAQ6510:
     def get_instrument_description(self, short=False):
         """Return the name of the opened instrument"""
         if short:
-            return "{} ({})".format(self.instrument_name, self.serial_number)
+            d = "{} ({})".format(self.instrument_name, self.serial_number)
         else:
             args = (self.instrument_name, self.serial_number, self.firmware_version, self.instrument_id)
-            return "KEITHLEY {}, S/N: {}, Firmware: {} {{{}}}".format(*args)
+            d = "KEITHLEY {}, S/N: {}, Firmware: {} {{{}}}".format(*args)
+        return d
 
     def clear_buffer(self):
         """
@@ -212,10 +220,13 @@ class DAQ6510:
             return  # nothing to do here
 
         if data_format == 'd':
+            self.logging.debug("Setting data format to double-precision float")
             self.send_command("FORM REAL")
         elif data_format == 'f':
+            self.logging.debug("Setting data format to single-precision float")
             self.send_command("FORM SREAL")
         elif data_format == 's':
+            self.logging.debug("Setting data format to ASCII text")
             self.send_command("FORM ASCII")
         else:
             raise Exception("Invalid data format! Format must be 'f', 'd' or 's'!")
@@ -232,6 +243,7 @@ class DAQ6510:
         :param data_points: The number of data points to read. Set 0 (default) if unknown.
         :return: The data received from the instrument as a numpy array.
         """
+        self.logging.debug("Sending data query: {}".format(command))
         if self.data_format:
             return self.instrument.query_binary_values(command, datatype=self.data_format,
                                                        container=np.array, data_points=data_points)
@@ -253,7 +265,7 @@ class DAQ6510:
         dt += timedelta(seconds=t_offset)  # add offset to sync device time with computer time
         return dt
 
-    def measure_DEA_resistance(self, deas, n_measurements=1, aperture=0.1, nplc=None):
+    def measure_DEA_resistance(self, deas, n_measurements=1, nplc=1, aperture=None):
         """
         Measure 4-point electrode ersistance on the specified channels.
         :param deas: A list of indices of the DEAs to measure (in range 0 to 5)
@@ -264,6 +276,7 @@ class DAQ6510:
         If None, aperture (in seconds) is used instead. Otherwise nplc takes precedence.
         :return: A 1-D numpy array of resistance values (one for each DEA)
         """
+
         n_deas = len(deas)
         if n_deas == 0:
             self.logging.warning("Reasistance measurement requested without any DEAs specified. Nothing is returned.")
@@ -272,16 +285,18 @@ class DAQ6510:
         str_channels = "(@111,{})".format(get_resistance_channels(deas))
         n_channels = len(deas) * 2 + 1
 
+        self.logging.debug("Measuring resistance for DEAs: {} {}".format(deas, str_channels))
+
         scan_timeout = 1 * n_channels * n_measurements  # should never take more than 1 second per measurement
 
         # self.send_command("*RST")
         self.send_command("FUNC 'VOLT:DC', {}".format(str_channels))
         # daq.send_command("VOLT:DC:RANG:AUTO ON, {}".format(str_channels))
         self.send_command("VOLT:DC:RANGe 10, {}".format(str_channels))
-        if nplc is not None:
-            self.send_command("VOLT:DC:NPLC {}, {}".format(nplc, str_channels))
-        else:
+        if aperture is not None:
             self.send_command("VOLT:DC:APERture {}, {}".format(aperture, str_channels))
+        else:
+            self.send_command("VOLT:DC:NPLC {}, {}".format(nplc, str_channels))
         self.send_query("VOLT:DC:NPLC? {}".format(str_channels))
         self.send_command("VOLT:DC:AZER OFF, {}".format(str_channels))
         self.send_command("AZERo:ONCE")  # zero once now before starting the scan
@@ -313,6 +328,8 @@ class DAQ6510:
         if np.any(Vsource < 9) or np.any(Vsource > 10):
             msg = "Source voltage for resistance measurement is outside the expected range: {}V".format(Vsource)
             self.logging.warning(msg)
+        else:
+            self.logging.debug("Source voltage for resistance measurement is {}V".format(Vsource))
 
         data = data[:, 1:]  # don't need the reference voltage anymore
 
@@ -324,23 +341,14 @@ class DAQ6510:
         Ishunt = Vshunt / Rshunt
         RDEA = VDEA / Ishunt
 
-        # print("Vsource:", Vsource, "V")
-        # print("")
-        # print("Vshunt: [DEA0, DEA1, ...]")
-        # print(Vshunt)
-        # print("")
-        # print("VDEA: [DEA0, DEA1, ...]")
-        # print(VDEA)
-        # print("")
-        # print("Ishunt: [DEA0, DEA1, ...] in µA")
-        # print(Ishunt * 1000000)
-        #
-        # print("")
-        # print("")
-        # print("Resistances: [DEA0, DEA1, ...] in kΩ")
-        # print(RDEA / 1000)
+        self.logging.debug("Applied current: {} mA".format(np.array2string(Ishunt * 1000, precision=2)))
+        self.logging.debug("Voltage across electrode: {} V".format(np.array2string(VDEA, precision=3)))
+        self.logging.debug("Electrode resistance: {} kΩ".format(np.array2string(RDEA / 1000, precision=3)))
 
-        return np.mean(RDEA, axis=0)
+        RDEA = np.mean(RDEA, axis=0)  # take avg even for single measurement to reduce to 1-D array
+        self.logging.debug("Average resistance: {} kΩ".format(np.array2string(RDEA / 1000, precision=3)))
+
+        return RDEA
 
     def measure_current(self, nplc=1):
         """
@@ -351,7 +359,11 @@ class DAQ6510:
         :return: A single current reading in A.
         """
 
+        self.logging.debug("Measuring current")
+
         if self.mode != DAQ6510.MODE_SENSE_CURRENT:  # only do setup if required
+            self.logging.debug("Switching to current sensing mode")
+
             # there is only one current channel used, so ne need to  select different channels for now.
             # self.send_command("*RST")  # make sure we start with default configuration
             self.send_command("SENS:FUNC 'CURR:DC', (@122)")
@@ -372,6 +384,8 @@ class DAQ6510:
         # perform a measurement
         cur = float(self.send_query("READ?"))
 
+        self.logging.debug("Measured current: {} A".format(cur))
+
         # self.send_command("ROUT:OPEN (@112)")  # open relays 112 and 113 again to switch 9.5V back on
         # self.send_command("ROUT:OPEN (@113)")
 
@@ -384,6 +398,9 @@ class DAQ6510:
         :return: The offset, in fractional seconds, that must be added to the multimeter time in order to make it match
         the computer's system time as determined by datetime.now()
         """
+
+        self.logging.warning("Calibrating instrument clock. This methodis known to be faulty. Do not use!")
+
         # TODO: don't change system time of the DAQ! It gets applied with some delay and may occur during measurement
         # TODO: get more precise estimate of the offset between the clocks somehow - this doesn't cut it!
         tstart = datetime.now()
@@ -414,22 +431,24 @@ def test_resistance_measurement():
     print("Result:", res)
 
 
-def test_current_measurements():
+def test_current_measurements(nplc=1):
     hvps = SwitchBoard()
     hvps.open()
     print("Connected to HVPS", hvps.get_name())
     print("Relays on:", hvps.set_relays_on([0]))
-    hvps.set_voltage(0)
+    # print("Relays on:", hvps.set_relays_on())
+    hvps.set_voltage(0, block_until_reached=True)
     hvps.set_switching_mode(0)
 
     daq = DAQ6510()
+    daq.connect(reset=True)
     # daq.set_timeout(0.01)
     daq.get_instrument_description()
 
     daq.send_command("*RST")
     daq.send_command("SENS:FUNC 'CURR:DC', (@122)")
     # daq.send_command("SENS:CURR:DC:APERture 0.02, (@122)")
-    daq.send_command("SENS:CURR:DC:NPLC 1, (@122)")  # measure for one power line cycle to avoid the 50 Hz noise
+    daq.send_command("SENS:CURR:DC:NPLC {}, (@122)".format(nplc))  # measure for n power line cycles
     daq.send_command("SENS:CURR:DC:RANGe 100e-6, (@122)")
     # daq.send_query("SENS:CURR:DC:APERture? (@122)")
     # daq.send_command("SENS:COUNt 10")
@@ -441,10 +460,15 @@ def test_current_measurements():
 
     # perform a series of measurements
     Vtest = 1000
-    n = [15, 80, 100]
-    settling_delay = 10
-    # sw_mode = "OC"
-    sw_mode = "DCDC"
+    # n = np.array(np.round(np.array([1500, 1500, 3000, 2000])/nplc), dtype=np.int)
+    # settling_delay = np.array(np.round(np.array([1000, 1000, 2000, 1500])/nplc), dtype=np.int)
+    n = np.array(np.round(np.array([150, 150, 500, 300]) / nplc), dtype=np.int)
+    settling_delay = np.array(np.round(np.array([50, 50, 200, 200]) / nplc), dtype=np.int)
+    # n = np.array(np.round(np.array([50, 50, 100, 100]) / nplc), dtype=np.int)
+    # settling_delay = np.array(np.round(np.array([20, 20, 40, 40]) / nplc), dtype=np.int)
+
+    sw_mode = "OC"
+    # sw_mode = "DCDC"
 
     cur = []
     V = []
@@ -452,10 +476,8 @@ def test_current_measurements():
     t = []
     ntotal = np.sum(n)
 
-    if sw_mode == "OC":
-        hvps.set_voltage(Vtest)  # ramp up voltage but OC remains off
-    elif sw_mode == "DCDC":
-        hvps.set_switching_mode(1)  # open OC but leave voltage 0
+    hvps.set_voltage(0)  # ramp up voltage but OC remains off
+    hvps.set_switching_mode(0)  # open OC but leave voltage 0
     for i in range(n[0]):
         cur.append(float(daq.send_query("READ?")))
         V.append(hvps.get_current_voltage())
@@ -464,26 +486,37 @@ def test_current_measurements():
         print("{:.1f} %".format(i / ntotal * 100))
 
     if sw_mode == "OC":
+        hvps.set_voltage(Vtest)  # ramp up voltage but OC remains off
+    elif sw_mode == "DCDC":
+        hvps.set_switching_mode(1)  # open OC but leave voltage 0
+    for i in range(n[1]):
+        cur.append(float(daq.send_query("READ?")))
+        V.append(hvps.get_current_voltage())
+        Vset.append(0)
+        t.append(time.perf_counter())
+        print("{:.1f} %".format((n[0] + i) / ntotal * 100))
+
+    if sw_mode == "OC":
         hvps.set_switching_mode(1)  # open OC to apply Vtest to DEAs
     elif sw_mode == "DCDC":
         hvps.set_voltage(Vtest)  # ramp up voltage to Vtest
-    for i in range(n[1]):
+    for i in range(n[2]):
         cur.append(float(daq.send_query("READ?")))
         V.append(hvps.get_current_voltage())
         Vset.append(Vtest)
         t.append(time.perf_counter())
-        print("{:.1f} %".format((n[0] + i) / ntotal * 100))
+        print("{:.1f} %".format((n[0] + n[1] + i) / ntotal * 100))
 
     if sw_mode == "OC":
         hvps.set_switching_mode(0)  # close OC to discharge DEAs
     elif sw_mode == "DCDC":
         hvps.set_voltage(0)  # reduce voltage to 0
-    for i in range(n[2]):
+    for i in range(n[3]):
         cur.append(float(daq.send_query("READ?")))
         V.append(hvps.get_current_voltage())
         Vset.append(0)
         t.append(time.perf_counter())
-        print("{:.1f} %".format((n[0] + n[1] + i) / ntotal * 100))
+        print("{:.1f} %".format((n[0] + n[1] + n[2] + i) / ntotal * 100))
 
     daq.send_command("ROUT:OPEN (@112)")  # open relays again to switch 9.5V back on
     daq.send_command("ROUT:OPEN (@113)")
@@ -501,35 +534,91 @@ def test_current_measurements():
     t = np.array(t)  # .reshape((-1, 1))
     t = t - t[0]
 
+    excl_avg = np.array([True] * ntotal)
+    avg = []
+    max_seg = []
+    tstart = []
     print("Leakage current [nA]:")
-    istart = 0 + settling_delay
-    iend = n[0]
-    print("V off ({:.2f} to {:.2f}): {:.5f}".format(t[istart], t[iend - 1], np.mean(cur[istart:iend])))
-    istart = n[0] + settling_delay
-    iend = n[0] + n[1]
-    print("V on ({:.2f} to {:.2f}): {:.5f}".format(t[istart], t[iend - 1], np.mean(cur[istart:iend])))
-    istart = n[0] + n[1] + settling_delay
-    iend = n[0] + n[1] + n[2]
-    print("V off ({:.2f} to {:.2f}): {:.5f}".format(t[istart], t[iend - 1], np.mean(cur[istart:iend])))
+    istart = 0 + settling_delay[0]
+    iend = n[0] - 1
+    avg.append(np.mean(cur[istart:iend]))
+    max_seg.append(np.max(cur[istart:iend]))
+    excl_avg[istart:iend] = False
+    tstart.append(t[istart])
+    print("V off, OC off ({:.2f} to {:.2f}): {:.5f}".format(t[istart], t[iend - 1], avg[-1]))
+    istart = n[0] + settling_delay[1]
+    iend = n[0] + n[1] - 1
+    avg.append(np.mean(cur[istart:iend]))
+    max_seg.append(np.max(cur[istart:iend]))
+    excl_avg[istart:iend] = False
+    tstart.append(t[istart])
+    print("V on, OC off ({:.2f} to {:.2f}): {:.5f}".format(t[istart], t[iend - 1], avg[-1]))
+    istart = n[0] + n[1] + settling_delay[2]
+    iend = n[0] + n[1] + n[2] - 1
+    avg.append(np.mean(cur[istart:iend]))
+    max_seg.append(np.max(cur[istart:iend]))
+    excl_avg[istart:iend] = False
+    tstart.append(t[istart])
+    print("V on, OC on ({:.2f} to {:.2f}): {:.5f}".format(t[istart], t[iend - 1], avg[-1]))
+    istart = n[0] + n[1] + n[2] + settling_delay[3]
+    iend = n[0] + n[1] + n[2] + n[3] - 1
+    avg.append(np.mean(cur[istart:iend]))
+    max_seg.append(np.max(cur[istart:iend]))
+    excl_avg[istart:iend] = False
+    tstart.append(t[istart])
+    print("V on, OC off ({:.2f} to {:.2f}): {:.5f}".format(t[istart], t[iend - 1], avg[-1]))
 
+    ftitle = "Leakage current test 1DEA, {} PLC".format(nplc)
+
+    mat = {"t": t, "I": cur, "V": V, "Iavg": avg, "phase_plc": n, "settling_delay_plc": settling_delay}
+    fname = 'test_data/nplc/{} {}'.format(datetime.now().strftime("%Y%m%d-%H%M%S"), ftitle)
+    sio.savemat(fname + ".mat", mat)
+
+    plt.close("all")
+    plt.rcParams.update({'font.size': 16})
     fig, ax1 = plt.subplots()
-
-    color = 'tab:red'
+    fig.set_size_inches(12, 8)
+    axcolor = (231 / 255, 76 / 255, 60 / 255)
     ax1.set_xlabel('Time (s)')
-    ax1.set_ylabel('Current [nA]', color=color)
-    ax1.plot(t, cur, color=color)
-    ax1.tick_params(axis='y', labelcolor=color)
+    ax1.set_ylabel('Current [nA]', color=axcolor)
+    ax1.plot(t, cur, ".-", color=(241 / 255, 148 / 255, 138 / 255))
+    cur[excl_avg] = np.nan
+    ax1.plot(t, cur, ".-", color=(203 / 255, 67 / 255, 53 / 255), lw=3, ms=10)
+    ax1.tick_params(axis='y', labelcolor=axcolor)
     ax1.grid(True)
+    for ts, y, c in zip(tstart, max_seg, avg):
+        ax1.text(ts, y + 5, "{:.3f} nA".format(c))
+    plt.title(ftitle)
 
     ax2 = ax1.twinx()  # instantiate a second axes that shares the same x-axis
 
     color = 'tab:blue'
     ax2.set_ylabel('Voltage [V]', color=color)  # we already handled the x-label with ax1
     # ax2.plot(t, Vset, color="k")
-    ax2.plot(t, V, color=color)
+    ax2.plot(t, V, ".-", color=color)
     ax2.tick_params(axis='y', labelcolor=color)
 
     fig.tight_layout()  # otherwise the right y-label is slightly clipped
+    plt.savefig(fname + '.png')
+
+    plt.show()
+
+    plt.close("all")
+    plt.rcParams.update({'font.size': 16})
+    fig, ax1 = plt.subplots()
+    fig.set_size_inches(12, 8)
+    axcolor = (231 / 255, 76 / 255, 60 / 255)
+    ax1.set_xlabel('Time (s)')
+    ax1.set_ylabel('Current [nA]', color=axcolor)
+    ax1.plot(t, cur, ".-", color=(203 / 255, 67 / 255, 53 / 255))
+    ax1.tick_params(axis='y', labelcolor=axcolor)
+    ax1.grid(True)
+    for ts, y, c in zip(tstart, max_seg, avg):
+        ax1.text(ts, 0, "{:.3f} nA".format(c))
+    plt.title(ftitle + "magnified")
+    fig.tight_layout()  # otherwise the right y-label is slightly clipped
+    plt.savefig(fname + 'mag.png')
+
     plt.show()
 
 
@@ -732,6 +821,7 @@ def measure_resistance_sequence():
 
 def test_digitize_current():
     daq = DAQ6510()
+    daq.connect(reset=True)
     # daq.set_timeout(10)
     daq.get_instrument_description()
     daq.set_data_format('f')
@@ -744,10 +834,10 @@ def test_digitize_current():
     hvps.set_switching_mode(0)
 
     t = 3  # measurement duration in sec
-    sample_rate = 100000  # 1000000
+    sample_rate = 1000000  # 1000000
     Vtest = 1000
-    # sw_mode = "OC"
-    sw_mode = "DCDC"
+    sw_mode = "OC"
+    # sw_mode = "DCDC"
 
     count = sample_rate * t  # 1 MHz sample rate
 
@@ -759,7 +849,7 @@ def test_digitize_current():
 
     daq.send_command("DIG:FUNC 'CURR'")  # select digitize current
     daq.send_command("DIG:CURR:RANG 100e-6")  # set measurement range to 100 µA (smallest range)
-    daq.send_command("DIG:CURR:SRAT {}".format(sample_rate))  # set sample rate to max (1MHz)
+    daq.send_command("DIG:CURR:SRAT {}".format(sample_rate))  # set sample rate (max 1MHz)
     daq.send_command("DIG:CURR:APER AUTO")  # set aperture to auto (will be 1µs @ 1MHz)
     daq.send_command("DIG:COUN {}".format(count))  # set number of measurements (theoretical max 7,000,000 at 1 MHz)
     daq.send_command(":TRIGger:BLOCk:MDIGitize 1, {}, AUTO".format(buffer))  # configure a trigger (just single shot)
@@ -784,6 +874,11 @@ def test_digitize_current():
     daq.send_command("INIT")
     start = time.perf_counter()
 
+    # measure everything off for a moment
+    hvps.set_voltage(0)
+    hvps.set_switching_mode(0)
+    time.sleep(0.1 * t)
+
     if sw_mode == "OC":
         hvps.set_voltage(Vtest)  # ramp up voltage but OC remains off
     elif sw_mode == "DCDC":
@@ -794,7 +889,7 @@ def test_digitize_current():
         hvps.set_switching_mode(1)  # open OC to apply Vtest to DEAs
     elif sw_mode == "DCDC":
         hvps.set_voltage(Vtest)  # ramp up voltage to Vtest
-    time.sleep(0.5 * t)
+    time.sleep(0.4 * t)
 
     if sw_mode == "OC":
         hvps.set_switching_mode(0)  # close OC to discharge DEAs
@@ -993,7 +1088,8 @@ if __name__ == '__main__':
     #     test_resistance_measurements(n_m, n_plc)
 
     # test_resistance_measurement()
-    # test_current_measurements()
+    # for nplc in [1]:
+    #     test_current_measurements(nplc)
     # measure_resistance_sequence()
     test_digitize_current()
     # test_digitize_voltage()
