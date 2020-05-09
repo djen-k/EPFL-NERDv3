@@ -327,7 +327,7 @@ def dea_fit_ellipse(img, mask=None, closing_radius=10, algorithm=1):
     return ellipse, mask
 
 
-def find_electrode_outline(img_bw, exclude_mask=None, max_iterations=20, center=None, convergence_threshold=0.00001):
+def find_electrode_outline(img_bw, exclude_mask=None, max_iterations=20, center=None, convergence_threshold=0.000001):
     if img_bw is None:
         logger.warning("No binary image specified!")
         return None, None

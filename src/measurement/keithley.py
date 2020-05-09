@@ -172,7 +172,7 @@ class DAQ6510:
         Reset the instrument to its default state by sending an 'RST' command.
         """
         self.send_command("*RST")  # reset instrument to put it in a known state
-        print("RESET")
+        self.logging.debug("RESET")
         self.mode = DAQ6510.MODE_DEFAULT
 
     def set_timeout(self, timeout_s):
@@ -277,6 +277,9 @@ class DAQ6510:
         :return: A 1-D numpy array of resistance values (one for each DEA)
         """
 
+        # TODO: Measure shunt resistor to calibrate current measurement
+        # TODO: Take two-point resistance measurement of electrode to check quality of contact and warn if bad
+
         n_deas = len(deas)
         if n_deas == 0:
             self.logging.warning("Reasistance measurement requested without any DEAs specified. Nothing is returned.")
@@ -292,7 +295,7 @@ class DAQ6510:
         # self.send_command("*RST")
         self.send_command("FUNC 'VOLT:DC', {}".format(str_channels))
         # daq.send_command("VOLT:DC:RANG:AUTO ON, {}".format(str_channels))
-        self.send_command("VOLT:DC:RANGe 10, {}".format(str_channels))
+        self.send_command("VOLT:DC:RANGe 10, {}".format(str_channels))  # should give us >10GΩ input impedance
         if aperture is not None:
             self.send_command("VOLT:DC:APERture {}, {}".format(aperture, str_channels))
         else:
@@ -312,7 +315,6 @@ class DAQ6510:
         while i < n_channels * n_measurements and elapsed < scan_timeout:
             time.sleep(0.1)
             i = int(self.send_query("TRACe:ACTual?"))
-            print(i)
             elapsed = time.perf_counter() - start
 
         data = self.send_query("TRACe:DATA? 1, {}, \"defbuffer1\", READ".format(i))
@@ -426,9 +428,9 @@ class DAQ6510:
 
 
 def test_resistance_measurement():
-    daq = DAQ6510()
-    res = daq.measure_DEA_resistance([0], n_measurements=10, nplc=1)
-    print("Result:", res)
+    daq = DAQ6510(auto_connect=True)
+    res = daq.measure_DEA_resistance(range(6), n_measurements=1, nplc=1)
+    print("Result:", np.array2string(res / 1000, precision=2))
 
 
 def test_current_measurements(nplc=1):
@@ -623,6 +625,107 @@ def test_current_measurements(nplc=1):
 
 
 def measure_resistance_sequence():
+    #######################################
+    #  test parameters
+    #######################################
+
+    folder = "test_data/res/"
+    fname = "{}_resistance+voltage_DCDC_DEA2".format(datetime.now().strftime("%Y%m%d-%H%M%S"))
+    DEAs = [0]
+
+    #######################################
+    #  initialize instruments
+    #######################################
+
+    # Multimeter #########################
+
+    daq = DAQ6510()
+    daq.connect(reset=True)
+    # daq.set_timeout(0.01)
+    print("Connected to", daq.get_instrument_description())
+    R = []
+
+    # Switchboard ########################################
+
+    hvps = SwitchBoard()
+    hvps.open()
+    print("Connected to HVPS", hvps.get_name())
+    print("Relays on:", hvps.set_relays_on())
+    # make sure everything is discharged
+    hvps.set_voltage(0)
+    hvps.set_switching_mode(0)
+    V = []
+    t = []
+
+    ########################################################
+    #  run test
+    ########################################################
+
+    hvps.set_switching_mode(1)
+    print("Recording data...")
+
+    #  start recording
+
+    for i in range(10):
+        t.append(time.perf_counter())
+        R.append(daq.measure_DEA_resistance(DEAs)[0])
+        V.append(hvps.get_current_voltage())
+
+    # set voltage high
+    hvps.set_voltage(1000)
+
+    for i in range(30):
+        t.append(time.perf_counter())
+        R.append(daq.measure_DEA_resistance(DEAs)[0])
+        V.append(hvps.get_current_voltage())
+
+    # set voltage low
+    hvps.set_voltage(0)
+
+    for i in range(20):
+        t.append(time.perf_counter())
+        R.append(daq.measure_DEA_resistance(DEAs)[0])
+        V.append(hvps.get_current_voltage())
+
+    ##########################################################
+    # retrieve and analyze data
+    ##########################################################
+
+    t = np.array(t) - t[0]
+    V = np.array(V)
+    R = np.array(R)
+
+    ##################################################################
+    # save data and visualization
+    ##################################################################
+
+    mat = {"t": t, "R": R, "V": V}
+    sio.savemat(folder + fname + ".mat", mat)
+
+    plt.rcParams.update({'font.size': 16})
+    fig, ax1 = plt.subplots()
+    fig.set_size_inches(12, 8)
+    axcolor = 'tab:red'
+    ax1.set_xlabel('Time (s)')
+    ax1.set_ylabel('Resistance [kΩ]', color=axcolor)
+    ax1.plot(t, R / 1000, ".-", color=axcolor)
+    ax1.tick_params(axis='y', labelcolor=axcolor)
+    ax1.grid(True)
+
+    ax2 = ax1.twinx()  # instantiate a second axes that shares the same x-axis
+
+    color = 'tab:blue'
+    ax2.set_ylabel('Voltage [V]', color=color)  # we already handled the x-label with ax1
+    ax2.plot(t, V, ".-", color=color)
+    ax2.tick_params(axis='y', labelcolor=color)
+
+    fig.tight_layout()  # otherwise the right y-label is slightly clipped
+    plt.savefig(folder + fname + '.png')
+
+    plt.show()
+
+
+def measure_sequence_all():
     #######################################
     #  test parameters
     #######################################
@@ -1090,8 +1193,8 @@ if __name__ == '__main__':
     # test_resistance_measurement()
     # for nplc in [1]:
     #     test_current_measurements(nplc)
-    # measure_resistance_sequence()
-    test_digitize_current()
+    measure_resistance_sequence()
+    # test_digitize_current()
     # test_digitize_voltage()
     # test_time_synchronisation()
     # x = np.arange(100)

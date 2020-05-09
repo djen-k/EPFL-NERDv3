@@ -81,7 +81,7 @@ class SetupDialog(QtWidgets.QDialog):
         self.cbb_switchboard.currentTextChanged.connect(self.cbb_comport_changed)
 
         # button to refresh com ports
-        self.btn_refresh_com = QtWidgets.QPushButton("Refresh COM")
+        self.btn_refresh_com = QtWidgets.QPushButton("Refresh switchboards")
         self.btn_refresh_com.clicked.connect(self.refresh_comports)
 
         # label to show what switchboard we're connected to
@@ -103,8 +103,12 @@ class SetupDialog(QtWidgets.QDialog):
         self.cbb_daq.currentTextChanged.connect(self.cbb_daq_changed)
 
         # button to refresh com ports
-        self.btn_refresh_daq = QtWidgets.QPushButton("Refresh VISA")
+        self.btn_refresh_daq = QtWidgets.QPushButton("Refresh multimeters")
         self.btn_refresh_daq.clicked.connect(self.refresh_multimeters)
+
+        # button to test resistance measurement
+        self.btn_test_res = QtWidgets.QPushButton("Measure resistance")
+        self.btn_test_res.clicked.connect(self.test_resistance)
 
         # label to show what switchboard we're connected to
         self.lbl_daq_status = QtWidgets.QLabel("no multimeter")
@@ -112,6 +116,7 @@ class SetupDialog(QtWidgets.QDialog):
         formLay.addRow("Multimeter:", self.cbb_daq)
         formLay.addRow("Status:", self.lbl_daq_status)
         formLay.addRow("", self.btn_refresh_daq)
+        formLay.addRow("", self.btn_test_res)
 
         separator = QtWidgets.QFrame()
         separator.setFrameShape(QtWidgets.QFrame.HLine)
@@ -428,6 +433,12 @@ class SetupDialog(QtWidgets.QDialog):
 
         self.cbb_daq.blockSignals(False)  # turn signals back on
         self.cbb_daq_changed()  # call DAQ changed once to connect to the newly selected com port
+
+    def test_resistance(self):
+        res = self._daq.measure_DEA_resistance(deas=range(6))
+        QtWidgets.QMessageBox.information(self,
+                                          "Resistance measurement results",
+                                          "Measured resistance (kΩ):\n{}".format(res / 1000))
 
     def cbb_daq_changed(self):
         daq_idx = self.cbb_daq.currentIndex()

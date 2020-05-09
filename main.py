@@ -155,6 +155,7 @@ class NERD:
         # initial state
         current_state = STATE_STARTUP  # start with a ramp
         current_step = 0
+        ac_active = False
         current_target_voltage = 0
         measured_voltage = 0
         prev_V_high = False
@@ -313,6 +314,8 @@ class NERD:
             # Measurements
             ###########################################################################
 
+            ac_active = ac_mode and current_state == STATE_WAITING_HIGH
+
             # First: fast measurements that are carried out every cycle ###################
 
             if not breakdown_occurred:  # don't record new data so we can save last data from before the breakdown
@@ -321,8 +324,8 @@ class NERD:
                 measured_voltage = self.hvps.get_current_voltage(from_buffer_if_available=True)
 
                 # measure leakage current
-                if self.daq is not None:
-                    leakage_current = self.daq.measure_current(nplc=1)  # measure total current for n power line cycles
+                if self.daq is not None and not ac_active:
+                    leakage_current = self.daq.measure_current(nplc=5)  # measure total current for n power line cycles
                     leakage_buf.append(leakage_current)  # append to buffer so we can average when we write the data
 
                 # capture images
@@ -331,7 +334,7 @@ class NERD:
                 # record time spent at high voltage
                 V_high = abs(measured_voltage - max_voltage) < 50  # 50 V margin around max voltage counts as high
                 if V_high and prev_V_high:
-                    if current_state == STATE_WAITING_HIGH and ac_mode:
+                    if ac_active:
                         duration_at_max_V += (now - time_last_voltage_measurement) / 2  # if AC, only on half the time
                     else:
                         duration_at_max_V += now - time_last_voltage_measurement
@@ -343,7 +346,7 @@ class NERD:
             if measurement_due and not breakdown_occurred:
 
                 # if in AC mode, switch to DC for the duration of the measurement
-                if current_state == STATE_WAITING_HIGH and ac_mode and not breakdown_occurred:
+                if ac_active and not breakdown_occurred:
                     self.logging.debug("Suspended AC mode during measurement")
                     self.hvps.set_switching_mode(1)  # set to DC. number of completed cycles will be remembered
                     time_measurement_started = time.perf_counter()  # record how long AC was suspended
@@ -357,6 +360,7 @@ class NERD:
                 # ------------------------------
                 # TODO: make all measurements fail-safe so the test continues running if any instrument fails
 
+                # TODO: add pasue before measurement! Important in AC, but also for current measurements generally
                 self.logging.info("Current voltage: {} V".format(measured_voltage))
                 self.logging.info("DEA state: {}".format(dea_state_el))
 
@@ -367,10 +371,10 @@ class NERD:
                     self.logging.info("Resistance [kΩ]: {}".format(Rdea / 1000))
 
                     # aggregate current measurements
-                    if ac_mode or len(leakage_buf) == 0:
+                    if ac_active or len(leakage_buf) == 0:
                         # can't use buffered measurements in AC mode since they might have been taken while switching
                         self.logging.debug("no leakage measurements in buffer. recording new one...")
-                        leakage_current = self.daq.measure_current(nplc=1)  # take new measurement
+                        leakage_current = self.daq.measure_current(nplc=5)  # take new measurement
                         leakage_cur_avg = leakage_current  # nothing to average -> take the newly recorded measurement
                     else:
                         leakage_cur_avg = np.mean(leakage_buf)  # average all current readings since the last time
@@ -378,7 +382,7 @@ class NERD:
                     self.logging.info("Leakage current [nA]: {}".format(leakage_cur_avg * 1000000000))
 
                 # --- resume cycling if in AC mode -------------------------------------
-                if current_state == STATE_WAITING_HIGH and ac_mode:
+                if ac_active:
                     cycles_completed = self.hvps.get_cycle_number()[0]  # cycles back to 0 if completed
                     # don't turn AC back on if all cycles completed (otherwise it'll start over)
                     if cycles_completed > 0:
@@ -503,7 +507,7 @@ class NERD:
             # check for user input to stay responsive
             # ------------------------------
 
-            if cv.waitKey(300) & 0xFF == ord('q'):
+            if cv.waitKey(1) & 0xFF == ord('q'):
                 self.shutdown_flag = True
 
         self.logging.critical("Exiting...")
