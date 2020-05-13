@@ -274,8 +274,12 @@ class DAQ6510:
         precedence over this parameter.
         :param nplc: The duration of each individual measurement in number of power line cycles (PLCs).
         If None, aperture (in seconds) is used instead. Otherwise nplc takes precedence.
-        :return: A 1-D numpy array of resistance values (one for each DEA)
+        :return: A 1-D numpy array of resistance values (one for each DEA), or None if the measurement was
+        not successful.
         """
+
+        if not self.is_connected():
+            return None
 
         # TODO: Measure shunt resistor to calibrate current measurement
         # TODO: Take two-point resistance measurement of electrode to check quality of contact and warn if bad
@@ -343,7 +347,7 @@ class DAQ6510:
         Ishunt = Vshunt / Rshunt
         RDEA = VDEA / Ishunt
 
-        self.logging.debug("Applied current: {} mA".format(np.array2string(Ishunt * 1000, precision=2)))
+        self.logging.debug("Applied current: {} µA".format(np.array2string(Ishunt * 1000000, precision=2)))
         self.logging.debug("Voltage across electrode: {} V".format(np.array2string(VDEA, precision=3)))
         self.logging.debug("Electrode resistance: {} kΩ".format(np.array2string(RDEA / 1000, precision=3)))
 

@@ -127,7 +127,7 @@ class SetupDialog(QtWidgets.QDialog):
 
         # create voltage selector
         self.num_voltage = self.create_num_selector(0, 5000, "voltage", 1000)
-        formLay.addRow("Voltage [V]:", self.num_voltage)
+        formLay.addRow("Test voltage [V]:", self.num_voltage)
 
         # toggle button to apply voltage (to check strain detection results)
         self.btn_apply_voltage = QtWidgets.QPushButton("Apply voltage now!")
@@ -155,11 +155,11 @@ class SetupDialog(QtWidgets.QDialog):
 
         # create measurement period selector
         self.num_measurement_period = self.create_num_selector(0, 1000, "measurement_period_s", 10)
-        formLay.addRow("Measure every (s):", self.num_measurement_period)
+        formLay.addRow("Measurement interval (s):", self.num_measurement_period)
 
         # create image save period selector
         self.num_save_image_period = self.create_num_selector(0, 1000, "save_image_period_min", 30)
-        formLay.addRow("Save images every (min):", self.num_save_image_period)
+        formLay.addRow("Save image interval (min):", self.num_save_image_period)
 
         # checkbox to enable AC mode
         self.chk_ac = QtWidgets.QCheckBox("AC mode")
@@ -169,7 +169,7 @@ class SetupDialog(QtWidgets.QDialog):
         # create AC frequency selector
         self.num_ac_frequency = self.create_num_selector(1, 1000, "ac_frequency_hz", 50)
         self.num_ac_frequency.valueChanged.connect(self.updateCycles)
-        formLay.addRow("Switching frequency [Hz]:", self.num_ac_frequency)
+        formLay.addRow("Cycle frequency [Hz]:", self.num_ac_frequency)
 
         # create number of cycles indicator
         self.lbl_cycles = QtWidgets.QLabel("")
@@ -270,27 +270,30 @@ class SetupDialog(QtWidgets.QDialog):
         # some GUI (layout stuff)
         # formLay = QtWidgets.QFormLayout(self)
 
-        # create the main layout: vertical box with description at the top, then grid of images, then Next button
+        # create the main layout
         mainLay = QtWidgets.QVBoxLayout(self)
 
+        # protocol schematic panel
         topLay = QtWidgets.QHBoxLayout()
         topLay.setAlignment(Qt.AlignLeft)
         # topLay.setContentsMargins(50, 5, 50, 5)
         topLay.addLayout(formLay)
-        schematic = QtWidgets.QLabel()
-        pix_schematic = QtGui.QPixmap("res/images/schematic_voltage.png").scaledToHeight(250, Qt.SmoothTransformation)
-        schematic.setPixmap(pix_schematic)
-        schematic.setAlignment(Qt.AlignTop)
-        schematic.setContentsMargins(20, 5, 20, 5)
-        topLay.addWidget(schematic)
+        self.schematic = QtWidgets.QLabel()
+        # self.pix_schematic_DC = QtGui.QPixmap("res/images/schematic.png").scaledToHeight(300, Qt.SmoothTransformation)
+        self.pix_schematic_DC = QtGui.QPixmap("res/images/NERD protocol schematic DC.png")
+        self.pix_schematic_AC = QtGui.QPixmap("res/images/NERD protocol schematic AC.png")
+        self.schematic.setPixmap(self.pix_schematic_DC)
+        self.schematic.setAlignment(Qt.AlignTop)
+        self.schematic.setContentsMargins(20, 0, 0, 0)
+        topLay.addWidget(self.schematic)
 
-        spacer = QtWidgets.QSpacerItem(1, 1, QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Minimum)
-        topLay.addSpacerItem(spacer)
+        # spacer = QtWidgets.QSpacerItem(1, 1, QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Minimum)
+        # topLay.addSpacerItem(spacer)
 
-        logo = QtWidgets.QLabel()
-        logo.setPixmap(QtGui.QPixmap("res/images/epfl_logo.png"))
-        logo.setAlignment(Qt.AlignTop)
-        topLay.addWidget(logo)
+        # logo = QtWidgets.QLabel()
+        # logo.setPixmap(QtGui.QPixmap("res/images/epfl_logo.png"))
+        # logo.setAlignment(Qt.AlignTop)
+        # topLay.addWidget(logo)
 
         mainLay.addLayout(topLay)
 
@@ -367,7 +370,12 @@ class SetupDialog(QtWidgets.QDialog):
         self.accept()
 
     def chkACClicked(self):
-        self.num_ac_frequency.setEnabled(self.chk_ac.isChecked())
+        if self.chk_ac.isChecked():
+            self.num_ac_frequency.setEnabled(True)
+            self.schematic.setPixmap(self.pix_schematic_AC)
+        else:
+            self.num_ac_frequency.setEnabled(False)
+            self.schematic.setPixmap(self.pix_schematic_DC)
         self.updateCycles()
 
     def refresh_comports(self):
@@ -436,9 +444,10 @@ class SetupDialog(QtWidgets.QDialog):
 
     def test_resistance(self):
         res = self._daq.measure_DEA_resistance(deas=range(6))
-        QtWidgets.QMessageBox.information(self,
-                                          "Resistance measurement results",
-                                          "Measured resistance (kΩ):\n{}".format(res / 1000))
+        if res is not None:
+            QtWidgets.QMessageBox.information(self,
+                                              "Resistance measurement results",
+                                              "Measured resistance (kΩ):\n{}".format(res / 1000))
 
     def cbb_daq_changed(self):
         daq_idx = self.cbb_daq.currentIndex()
