@@ -38,7 +38,7 @@ class SetupDialog(QtWidgets.QDialog):
 
         # self._preview_img_size = [640, 360]  # [720, 405]  # [800, 450]
         img_size = [1920, 1080]
-        self._preview_img_size = Screen.get_max_size_on_screen(img_size, (2, 3), (80, 750))
+        self._preview_img_size = Screen.get_max_size_on_screen(img_size, (2, 3), (100, 800))
         self._adjustment_view_size = Screen.get_max_size_on_screen(img_size, margin=(20, 100))
 
         # register callback
