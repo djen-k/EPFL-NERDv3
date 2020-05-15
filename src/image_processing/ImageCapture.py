@@ -451,7 +451,9 @@ class ImageCapture:
         """
         image_sets = [self.read_images() for i in range(n)]
         image_sets_np = np.array(image_sets)
-        if image_sets_np.ndim == 4:  # all images are the same size and have been combined into a numeric array
+        if image_sets_np.ndim == 5:
+            # all images are the same size and have been combined into a numeric array
+            # of size [n_sets x n_cams x width x height x c_depth]  -> ndims == 5
             avgs = np.mean(image_sets_np, axis=0).round().astype(np.uint8)
             avgs = list(avgs)
         elif image_sets_np.ndim == 2:  # images are of different size and could not be combined into a numeric array

@@ -137,6 +137,7 @@ class StrainDetector:
             strain_out = np.bitwise_or(strain > self._strain_threshold, strain < self._neg_strain_threshold)
             strain_out = np.any(strain_out, axis=1)
             outlier = np.bitwise_or(outlier, strain_out)
+            # TODO: make it so this doesn't crash if value are None or nan
             shift_out = np.abs(center_shift) > self._shift_threshold
             shift_out = np.any(shift_out, axis=1)
             outlier = np.bitwise_or(outlier, shift_out)
