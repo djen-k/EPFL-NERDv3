@@ -22,10 +22,10 @@ class StrainDetector:
         self.setting_reference = False
 
         self.query_angles = np.array(query_angles)
-        self._strain_threshold = 50  # above 50 % strain can be considered an outlier
-        self._neg_strain_threshold = -10  # below -10 % strain can be considered an outlier
-        self._shift_threshold = 100  # above 100 px shift along either axis can be considered an outlier
-        self._image_deviation_threshold = 0.15  # if the average deviation is more than 15%, something bad happened
+        self.outlier_strain_threshold = 50  # above 50 % strain can be considered an outlier
+        self.outlier_negative_strain_threshold = -10  # below -10 % strain can be considered an outlier
+        self.center_shift_threshold = 100  # above 100 px shift along either axis can be considered an outlier
+        self.image_deviation_threshold = 0.1  # if the average deviation is more than 10%, something bad happened
 
     def set_reference(self, reference_images):
         self._reference_images = None
@@ -82,7 +82,7 @@ class StrainDetector:
             if self._reference_images is not None:
                 img_dev = self.get_deviation_from_reference(imgs)
                 self.logging.debug("Image deviations: {}".format(img_dev))
-                outlier = np.bitwise_or(outlier, np.array(img_dev) > self._image_deviation_threshold)
+                outlier = np.bitwise_or(outlier, np.array(img_dev) > self.image_deviation_threshold)
 
         # initialize lists to store results
         ellipses = [None] * n_img
@@ -92,7 +92,17 @@ class StrainDetector:
 
         # get fit for each DEA
         for i in range(n_img):
-            ellipse, mask = dea_fit_ellipse(imgs[i], self._exclude_masks[i])
+            ellipse, mask = dea_fit_ellipse(imgs[i], masks[i])
+            if masks[i] is None:
+                # If there was no mask on the first run, the first run is only used to generate a mask.
+                # We then run fit ellipse again to generate the actual fit.
+                # This step is crucial to ensure that subsequent calls to dea_fit_ellipse return consistent results.
+                # The values returned without a mask differ from those with a mask.
+                # Should maybe fix this at some point but for now we'll just call fit ellipse twice.
+                self.logging.debug("ellipse fitting was run without exclusion masks. "
+                                   "This can lead to inaccurate results. "
+                                   "Running ellipse fit again with newly generated masks.")
+                ellipse, mask = dea_fit_ellipse(imgs[i], mask)
             ellipses[i] = ellipse
             masks[i] = mask
 
@@ -134,11 +144,13 @@ class StrainDetector:
 
         # check if strain is too large
         if check_visual_state:
-            strain_out = np.bitwise_or(strain > self._strain_threshold, strain < self._neg_strain_threshold)
+            strain = strain * 100 - 100  # convert to engineering strain
+            strain_out = np.bitwise_or(strain > self.outlier_strain_threshold,
+                                       strain < self.outlier_negative_strain_threshold)
             strain_out = np.any(strain_out, axis=1)
             outlier = np.bitwise_or(outlier, strain_out)
             # TODO: make it so this doesn't crash if value are None or nan
-            shift_out = np.abs(center_shift) > self._shift_threshold
+            shift_out = np.abs(center_shift) > self.center_shift_threshold
             shift_out = np.any(shift_out, axis=1)
             outlier = np.bitwise_or(outlier, shift_out)
 
@@ -340,7 +352,6 @@ def find_electrode_outline(img_bw, exclude_mask=None, max_iterations=20, center=
     # get contours
     cont = find_contour(img_bw, center)
     ellipse = None
-    old_area = np.nan
     new_area = np.nan
     converged = False
     i = 0
@@ -718,13 +729,13 @@ if __name__ == '__main__':
 
     duallog.setup("logs", minlevelConsole=logging.DEBUG, minLevelFile=logging.DEBUG)
 
-    # test_image_folder = "D:/NERD output/NERD test 20200225-182457/DEA 1/Images/"
-    test_image_folder = "../../output/Test7/"
+    test_image_folder = "C:/Users/Djen/PycharmProjects/EPFL-NERDv3/output/" \
+                        "NERD test 20200515-112322 test strain detection on this one!/DEA 2/Images/"
+    # test_image_folder = "../../output/Test7/"
     files = os.listdir(test_image_folder)
 
     _strain_detector = StrainDetector((0, 90))
 
-    tic = time.perf_counter()
     ref_img = None
     for file in files:
         fpath = os.path.join(test_image_folder, file)
@@ -734,16 +745,22 @@ if __name__ == '__main__':
         if ref_img is None:
             ref_img = _img
 
-        print("File:", file)
-        _result_strain, _result_center_shift, \
-        _result_images, _outlier = _strain_detector.get_dea_strain([_img], True, True)
-        print("Strain:", _result_strain)
-        print("Area strain:", _result_strain[0, 0])
-        print("Average strain:", _result_strain[0, -1])
-        print("Average approx:", np.mean(_result_strain[0, 1:-1]))
+        for i in range(3):
+            print("File:", file)
+            tic = time.perf_counter()
 
-        cv.imshow("Difference", _result_images[0])
-        cv.waitKey()
+            _result_strain, _result_center_shift, \
+            _result_images, _outlier = _strain_detector.get_dea_strain([_img], True, True)
+            toc = time.perf_counter()
+
+            print("Strain:", _result_strain)
+            print("Area strain:", _result_strain[0, 0])
+            print("Average strain:", _result_strain[0, -1])
+            print("Average approx:", np.mean(_result_strain[0, 1:-1]))
+            print("Elapsed time:", toc - tic, "s")
+
+            cv.imshow("Image", _result_images[0])
+            cv.waitKey()
 
         # print("Outlier: ", _outlier)
         #

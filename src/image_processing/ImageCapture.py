@@ -1,7 +1,7 @@
 import logging
 import time
 from datetime import datetime
-from threading import Thread, Event, Lock, Timer
+from threading import Thread, Event, Lock
 
 import cv2 as cv
 import numpy as np
@@ -428,7 +428,12 @@ class ImageCapture:
 
         return frames
 
-    def read_single(self, cam_id):
+    def read_single_image(self, cam_id):
+        """
+        Read a single image from the specified camera
+        :param cam_id: A camera identifier which can be either a camera name string or an index
+        :return: a newly retrieved image from the specified camera
+        """
         # check if is initialized
         if self._camera_count == -1:  # not initialized yet  --> go find cameras
             self.logging.info("ImageCapture not yet initialized. Initializing cameras...")
@@ -443,29 +448,62 @@ class ImageCapture:
 
         return None  # in case anything failed
 
-    def read_average(self, n):
+    def read_average_images(self, n, deviation_threshold=0.03):
         """
-        Read several images and average them (for each camera)
-        :param n: How many images to average
+        Read several images and average them (for each camera) to get a set of images with reduced noise.
+        If any image in the set of images to be averaged deviates too much from the others, it is discarded and a new image
+        is recorded until the desired number of images is available for averaging.
+        :param int n: How many images to average
+        :param float deviation_threshold: Image deviation threshold above which an image is excluded from the average,
+        given as a value between 0 and 1 (e.g. 0.1 -> image is discarded if deviation if more than 10%)
         :return: A set of averaged images
         """
-        image_sets = [self.read_images() for i in range(n)]
-        image_sets_np = np.array(image_sets)
-        if image_sets_np.ndim == 5:
-            # all images are the same size and have been combined into a numeric array
-            # of size [n_sets x n_cams x width x height x c_depth]  -> ndims == 5
-            avgs = np.mean(image_sets_np, axis=0).round().astype(np.uint8)
-            avgs = list(avgs)
-        elif image_sets_np.ndim == 2:  # images are of different size and could not be combined into a numeric array
-            avgs = []
-            for i in range(len(image_sets[0])):  # iterate over number of cams
-                img_set = [sets[i] for sets in image_sets]
-                img_set = np.array(img_set)
-                avg = np.mean(img_set, axis=0).round().astype(np.uint8)
-                avgs.append(avg)
-        else:
-            self.logging.critical("Image sets for averaging have unexpected shape...?!")
-            raise Exception("Image sets for averaging have unexpected shape...?!")
+        # get set of n images from each camera
+        image_sets = []
+        for i in range(n):
+            img_set = self.read_images()
+            # check for outliers (glitched images)
+            if i > 0:  # nothing to compare with just the first image
+                # check for new image from each camera
+                for c in range(self._camera_count):
+                    deviation = StrainDetection.get_image_deviation(image_sets[0][c], img_set[c])
+                    new_image_count = 0
+                    new_reference_count = 0
+                    while deviation > deviation_threshold:
+                        if new_image_count > 5:  # make sure we don't get stuck trying indefinitely
+                            if new_reference_count > 0:  # make sure we don't get stuck trying indefinitely
+                                self.logging.debug("Failed to record matching image for new reference "
+                                                   "for camera {}. Aborting.".format(c))
+                                img_set[c] = None
+                                break
+                            self.logging.debug("Failed to record matching images for averaging "
+                                               "for camera {}. Using new reference".format(c))
+                            image_sets[0][c] = self.read_single_image(c)
+                            new_reference_count = + 1
+                            new_image_count = 0  # reset count
+                        else:
+                            self.logging.debug("Image averaging: Outlier detected "
+                                               "in image {} from camera {}. Recording new image.".format(i, c))
+                        img_set[c] = self.read_single_image(c)
+                        deviation = StrainDetection.get_image_deviation(image_sets[0][c], img_set[c])
+                        new_image_count += 1
+            image_sets.append(img_set)
+
+        # transpose so we have one list of n images for each camera (instead of n lists of one image per camera)
+        image_sets = list(map(list, zip(*image_sets)))
+
+        avgs = []
+        for i in range(self._camera_count):  # iterate over number of cams. there must be one set for each cam
+            img_set = image_sets[i]
+            # remove Nones (where not matching image could be recorded even after trying real hard)
+            img_set = [img for img in img_set if img is not None]
+            if len(img_set) < n:
+                msg = "Only {} matching images from {} could be recorded for averaging (instead of {})."
+                self.logging.warning(msg.format(len(img_set), self._camera_names[i], n))
+            img_set = np.array(img_set)
+            avg = np.mean(img_set, axis=0).round().astype(np.uint8)
+            avgs.append(avg)
+
         return avgs
 
     def get_images_from_buffer(self):
@@ -669,42 +707,46 @@ if __name__ == '__main__':
 
     cap = SharedInstance
     cap.find_cameras()
-    cap.select_cameras([0])
-
-    # print("exposure:", cap.set_fixed_exposure())
-
-    times = []
-    frames = []
-    lock = Lock()
-    timestamp_start = datetime.now()  # record reference time
-
-
-    def new_frame(image, timestamp, camera_id):
-        with lock:
-            frames.append(image)
-            times.append((timestamp - timestamp_start).total_seconds())
-            print("received frame {}".format(len(frames)))
-
-
-    cap.set_new_image_callback(new_frame)
-    cap.start_capture_thread(max_fps=0)
-    timer = Timer(10, cap.stop_capture_thread)
-    timer.start()
-
-    frame_index = 0
-    time.sleep(11)
-    # while cap.is_capture_thread_running():
+    _avg = cap.read_average_images(10)
+    for _img in _avg:
+        cv.imshow("Image", _img)
+        cv.waitKey()
+    # cap.select_cameras([0])
+    #
+    # # print("exposure:", cap.set_fixed_exposure())
+    #
+    # times = []
+    # frames = []
+    # lock = Lock()
+    # timestamp_start = datetime.now()  # record reference time
+    #
+    #
+    # def new_frame(image, timestamp, camera_id):
     #     with lock:
-    #         if len(frames) > frame_index:
-    #             cv.imshow("Current Frame", frames[-1])
-    #             cv.waitKey(1)  # refresh window and check for user input
-    #             frame_index = len(frames)
-
-    elapsed_time_s = (datetime.now() - timestamp_start).total_seconds()
-    cap.close_cameras()
-
-    print("elapsed time: {} s".format(elapsed_time_s))
-    np.set_printoptions(formatter={'float': '{: 0.2f}'.format}, linewidth=500)  # set print format for arrays
-    print(np.array(times).reshape((-1, 1)))
-    time.sleep(1)
-    logging.info("done")
+    #         frames.append(image)
+    #         times.append((timestamp - timestamp_start).total_seconds())
+    #         print("received frame {}".format(len(frames)))
+    #
+    #
+    # cap.set_new_image_callback(new_frame)
+    # cap.start_capture_thread(max_fps=0)
+    # timer = Timer(10, cap.stop_capture_thread)
+    # timer.start()
+    #
+    # frame_index = 0
+    # time.sleep(11)
+    # # while cap.is_capture_thread_running():
+    # #     with lock:
+    # #         if len(frames) > frame_index:
+    # #             cv.imshow("Current Frame", frames[-1])
+    # #             cv.waitKey(1)  # refresh window and check for user input
+    # #             frame_index = len(frames)
+    #
+    # elapsed_time_s = (datetime.now() - timestamp_start).total_seconds()
+    # cap.close_cameras()
+    #
+    # print("elapsed time: {} s".format(elapsed_time_s))
+    # np.set_printoptions(formatter={'float': '{: 0.2f}'.format}, linewidth=500)  # set print format for arrays
+    # print(np.array(times).reshape((-1, 1)))
+    # time.sleep(1)
+    # logging.info("done")

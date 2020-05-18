@@ -1,0 +1,6 @@
+18/05/2020 - Strain detection: fixed problem of different strain values between first and subsequent calls do dea_fit_ellipse which caused the strain reference to be wrong.
+18/05/2020 - Setup Dialog: no longer crashes if more than 6 cameras exist
+18/05/2020 - Strain detection: Made sure that the image averaging routine checks for outliers so it doesn't get messed up by glitched images
+18/05/2020 - Setup Dialog: Settings are saved even if dialog is closed without starting a test
+18/05/2020 - Setup Dialog: Take new image and record strain reference buttons now disable while busy, prefenting impatient clicks
+18/05/2020 - Switchboard: Made min voltage a Switchboard property. Changed set_voltage_no_overshoot to only activate when above the min voltage. Increased threshold and timeout when waiting for voltage to reach the set point to avoid false positives in fault detection.

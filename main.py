@@ -31,16 +31,18 @@ def _setup():
     # Show setup dialog to get COM port and camera order
     setup_dialog = SetupDialog.SetupDialog(config)
 
-    if setup_dialog.exec_():
-        config, strain_detector = setup_dialog.get_results()
-        logging.info("{}".format(config))
+    ok = setup_dialog.exec_()
 
-        try:
-            write_config(config_file_name, config)
-            logging.info("Wrote config file")
-        except Exception as ex:
-            logging.warning("Unable to write config file: {}".format(ex))
-    else:
+    config, strain_detector = setup_dialog.get_results()
+    logging.info("{}".format(config))
+
+    try:
+        write_config(config_file_name, config)
+        logging.info("Wrote config file")
+    except Exception as ex:
+        logging.warning("Unable to write config file: {}".format(ex))
+
+    if not ok:
         logging.critical("Aborted by user")
         raise Exception("Aborted by user")
 
@@ -127,7 +129,7 @@ class NERD:
         # apply user config ######################################################################
 
         max_voltage = self.config["voltage"]
-        min_voltage = 300
+        min_voltage = self.hvps.minimum_voltage
         # TODO: check why min voltage is 300 V (officially 50, but doesn't always seem to work)
         nsteps = self.config["steps"]
         voltage_step = max_voltage / nsteps  # can be fractional, will be rounded when voltage is set

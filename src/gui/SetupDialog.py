@@ -6,6 +6,7 @@ import time
 import cv2
 from PyQt5 import QtWidgets, QtGui
 from PyQt5.QtCore import Qt
+from PyQt5.QtWidgets import QApplication
 
 from src.gui import QtImageTools, Screen
 from src.hvps.Switchboard import SwitchBoard
@@ -229,8 +230,8 @@ class SetupDialog(QtWidgets.QDialog):
         self.btnStart.clicked.connect(self.btnStartClicked)
 
         # button to take new images
-        self.btnCapture = QtWidgets.QPushButton("Take new image")
-        self.btnCapture.clicked.connect(self.btnCaptureClicked)
+        self.btn_capture = QtWidgets.QPushButton("Take new image")
+        self.btn_capture.clicked.connect(self.btnCaptureClicked)
 
         # button to take new images
         self.chkStrain = QtWidgets.QCheckBox("Show strain")
@@ -238,8 +239,8 @@ class SetupDialog(QtWidgets.QDialog):
         self.chkStrain.clicked.connect(self.btnCaptureClicked)
 
         # button to record strain reference
-        self.btnReference = QtWidgets.QPushButton("Record strain reference")
-        self.btnReference.clicked.connect(self.record_strain_reference)
+        self.btn_reference = QtWidgets.QPushButton("Record strain reference")
+        self.btn_reference.clicked.connect(self.record_strain_reference)
 
         # create number of average images for strain ref selector
         self.num_avg_img = self.create_num_selector(1, 100, "average_images", 10)
@@ -255,9 +256,9 @@ class SetupDialog(QtWidgets.QDialog):
 
         buttonLay = QtWidgets.QHBoxLayout()
         buttonLay.setAlignment(Qt.AlignLeft)
-        buttonLay.addWidget(self.btnCapture)
+        buttonLay.addWidget(self.btn_capture)
         buttonLay.addWidget(self.chkStrain)
-        buttonLay.addWidget(self.btnReference)
+        buttonLay.addWidget(self.btn_reference)
         buttonLay.addWidget(QtWidgets.QLabel("Average images:"))
         buttonLay.addWidget(self.num_avg_img)
         buttonLay.addSpacerItem(QtWidgets.QSpacerItem(20, 1))
@@ -475,15 +476,22 @@ class SetupDialog(QtWidgets.QDialog):
                 self.btnCaptureClicked()
 
     def record_strain_reference(self):
-        # TODO: protect against impatient clicks
+        # protect against impatient clicks
+        self.btn_reference.setFixedSize(self.btn_reference.size())
+        self.btn_reference.setText("Busy...")
+        self.btn_reference.setEnabled(False)
+        QApplication.processEvents()
 
         cap = self._image_capture
-        images = cap.read_average(self.num_avg_img.value())
+        images = cap.read_average_images(self.num_avg_img.value())
         order = self.getCamOrder()
         order_filt = [i for i in order if i >= 0]  # filter to remove unused cameras (-1)
         images = [images[i] for i in order_filt]  # put image sets in the right order
 
         self._set_strain_reference(images)
+
+        self.btn_reference.setText("Record strain reference")
+        self.btn_reference.setEnabled(True)
 
     def _set_strain_reference(self, images):
         self._strain_detector = StrainDetection.StrainDetector()
@@ -559,7 +567,7 @@ class SetupDialog(QtWidgets.QDialog):
         ret = -1
         while ret == -1:
             try:
-                img = self._image_capture.read_single(i_cam)
+                img = self._image_capture.read_single_image(i_cam)
                 img = cv2.resize(img, self._adjustment_view_size)
                 cv2.imshow("DEA {} - Press any key to close".format(i_dea + 1), img)
                 ret = cv2.waitKey(100)
@@ -616,7 +624,7 @@ class SetupDialog(QtWidgets.QDialog):
                 v = self._hvps.get_current_voltage()
                 sv = "{} V".format(v)
             except Exception as ex:
-                self.logging.debug("Couldn't read vooltage: {}".format(ex))
+                self.logging.debug("Couldn't read voltage: {}".format(ex))
                 sv = ""
             images = self._strain_detector.get_dea_strain(images, True, True, sv)[2]
 
@@ -630,6 +638,8 @@ class SetupDialog(QtWidgets.QDialog):
                 self.setImage(i_dea, ImageCapture.ImageCapture.IMG_NOT_AVAILABLE)
 
     def setImage(self, i_dea, opencv_image, img_size=None):
+        if i_dea > 5:
+            return  # can't show more than 6 deas for now
         label = self.lbl_image[i_dea]
 
         if img_size is None:
@@ -644,8 +654,16 @@ class SetupDialog(QtWidgets.QDialog):
         self.setImage(int(cam_id[-1]) - 1, image)  # convert last character of name to 0-based index
 
     def btnCaptureClicked(self):
-        # TODO: protect against impatient clicks
-        self.updateImages(self._image_capture.read_images(), self._image_capture.get_timestamps())
+        # protect against impatient clicks
+        self.btn_capture.setFixedSize(self.btn_capture.size())
+        self.btn_capture.setText("Busy...")
+        self.btn_capture.setEnabled(False)
+        QApplication.processEvents()
+
+        self.update_images(self._image_capture.read_images(), self._image_capture.get_timestamps())
+
+        self.btn_capture.setText("Take new image")
+        self.btn_capture.setEnabled(True)
 
     def getCamOrder(self):
         return [cb.currentIndex() - 1 for cb in self.cbb_camera_select]
@@ -657,8 +675,10 @@ class SetupDialog(QtWidgets.QDialog):
         """
         daq_ind = self.cbb_daq.currentIndex() - 1  # -1 because first is "None"
         daq_id = self.daq_ids[daq_ind] if daq_ind >= 0 else "None"  # specifically selected no multimeter
+        sb_ind = self.cbb_switchboard.currentIndex()
+        sb_id = self.com_ports[sb_ind] if sb_ind >= 0 else "None"  # so it doesn't crash if none is selected
         config = {
-            "com_port": self.com_ports[self.cbb_switchboard.currentIndex()],
+            "com_port": sb_id,
             "daq_id": daq_id,
             "cam_order": self.getCamOrder(),
             "voltage": self.num_voltage.value(),
@@ -705,7 +725,7 @@ class SetupDialog(QtWidgets.QDialog):
                     self.lbl_image[i].setPixmap(
                         QtImageTools.conv_Qt(ImageCapture.ImageCapture.IMG_NOT_AVAILABLE, self._preview_img_size))
 
-    def updateImages(self, images, timestamps):
+    def update_images(self, images, timestamps):
 
         if self.n_cams != len(images):  # new camera added
             self.logging.debug("new cameras added")

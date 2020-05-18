@@ -19,6 +19,8 @@ class SwitchBoard(HVPS):
         self.connection_timeout = -1
         self.t_0 = None
 
+        self.minimum_voltage = 300  # could add option to query the switchboard but we'll stick with this for now
+
     def __del__(self):
         try:
             self.set_voltage(0, block_until_successful=True)
@@ -146,10 +148,10 @@ class SwitchBoard(HVPS):
 
         ret = super().set_voltage(voltage)
         if block_until_reached:
-            timeout = 3  # if voltage has not reached its set point in 3 s, something must be wrong!
+            timeout = 5  # if voltage has not reached its set point in 5 s, something must be wrong!
             start = time.perf_counter()
             elapsed = 0
-            while abs(voltage - self.get_current_voltage()) > 10:
+            while abs(voltage - self.get_current_voltage()) > 50:
                 if elapsed > timeout:
                     raise TimeoutError("Voltage has not reached the set point after 3 seconds! Please check the HVPS!")
                 if elapsed == 0:  # only write message once
@@ -168,7 +170,7 @@ class SwitchBoard(HVPS):
         """
         v = self.get_current_voltage(from_buffer_if_available=True)
         dv = voltage - v
-        if dv > 100:  # if increasing voltage (and by more than a few volts), do it slowly
+        if dv > 100 and voltage > self.minimum_voltage:  # if increasing (and by more than a few volts), do it slowly
             self.set_voltage(round(voltage * 0.7), block_until_reached=True)
             self.set_voltage(round(voltage * 0.9), block_until_reached=True)
         return self.set_voltage(voltage, block_until_reached=True)
