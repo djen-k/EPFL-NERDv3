@@ -165,6 +165,7 @@ class DAQ6510:
             raise Exception("Not connected to any instrument")
         self.logging.debug("Sending query: {}".format(command))
         res = self.instrument.query(command)
+        self.logging.debug("Response: {}".format(res))
         return res
 
     def reset(self):
@@ -267,7 +268,7 @@ class DAQ6510:
 
     def measure_DEA_resistance(self, deas, n_measurements=1, nplc=1, aperture=None):
         """
-        Measure 4-point electrode ersistance on the specified channels.
+        Measure 4-point electrode resistance on the specified channels.
         :param deas: A list of indices of the DEAs to measure (in range 0 to 5)
         :param n_measurements: The number of measurements to take. If more than 1, the results will be averaged.
         :param aperture: The aperture (duration) of each individual measurement in seconds. If defined, nplc takes
@@ -286,7 +287,7 @@ class DAQ6510:
 
         n_deas = len(deas)
         if n_deas == 0:
-            self.logging.warning("Reasistance measurement requested without any DEAs specified. Nothing is returned.")
+            self.logging.warning("Resistance measurement requested without any DEAs specified. Nothing is returned.")
             return []
 
         str_channels = "(@111,{})".format(get_resistance_channels(deas))
@@ -298,7 +299,7 @@ class DAQ6510:
 
         # self.send_command("*RST")
         self.send_command("FUNC 'VOLT:DC', {}".format(str_channels))
-        # daq.send_command("VOLT:DC:RANG:AUTO ON, {}".format(str_channels))
+        # self.send_command("VOLT:DC:RANG:AUTO ON, {}".format(str_channels))
         self.send_command("VOLT:DC:RANGe 10, {}".format(str_channels))  # should give us >10GΩ input impedance
         if aperture is not None:
             self.send_command("VOLT:DC:APERture {}, {}".format(aperture, str_channels))
@@ -355,6 +356,103 @@ class DAQ6510:
         self.logging.debug("Average resistance: {} kΩ".format(np.array2string(RDEA / 1000, precision=3)))
 
         return RDEA
+
+    def measure_DEA_resistance_with_checks(self, deas, n_measurements=1, nplc=1, aperture=None):
+        """
+        Measure 4-point electrode resistance on the specified channels. Also performs 2-point measurements to check that
+        the contacts are OK.
+        :param deas: A list of indices of the DEAs to measure (in range 0 to 5)
+        :param n_measurements: The number of measurements to take. If more than 1, the results will be averaged.
+        :param aperture: The aperture (duration) of each individual measurement in seconds. If defined, nplc takes
+        precedence over this parameter.
+        :param nplc: The duration of each individual measurement in number of power line cycles (PLCs).
+        If None, aperture (in seconds) is used instead. Otherwise nplc takes precedence.
+        :return: A 1-D numpy array of resistance values (one for each DEA), or None if the measurement was
+        not successful.
+        """
+
+        if not self.is_connected():
+            return None
+
+        # TODO: Measure shunt resistor to calibrate current measurement
+        # TODO: Take two-point resistance measurement of electrode to check quality of contact and warn if bad
+
+        n_deas = len(deas)
+        if n_deas == 0:
+            self.logging.warning("Resistance measurement requested without any DEAs specified. Nothing is returned.")
+            return []
+
+        # check supply voltage #######################################
+        str_channels = "(@111)"
+        self.send_command("FUNC 'VOLT:DC', {}".format(str_channels))
+        self.send_command("VOLT:DC:RANG:AUTO ON, {}".format(str_channels))
+        self.send_command("VOLT:DC:NPLC 1, {}".format(str_channels))
+        self.send_command("VOLT:DC:AZER ON, {}".format(str_channels))
+        self.send_command("ROUT:CLOSe (@111)")
+        time.sleep(5)
+        v_source = float(self.send_query("READ?"))
+        if np.any(v_source < 9) or np.any(v_source > 10):
+            msg = "Source voltage for resistance measurement is outside the expected range: {}V".format(v_source)
+            self.logging.warning(msg)
+            print(msg)
+        else:
+            self.logging.debug("Source voltage for resistance measurement is {}V".format(v_source))
+            print("Source voltage for resistance measurement is {}V".format(v_source))
+
+        for dea in deas:
+            str_channels = "(@103)"  # .format(get_resistance_channels(dea))
+
+            self.logging.debug("Measuring resistance for DEA {} (channels: {})".format(deas, str_channels))
+
+            self.send_command("FUNC 'RES', {}".format(str_channels))
+            self.send_command("ROUT:CLOSe (@103)")
+            time.sleep(5)
+            shunt_res_on = float(self.send_query("READ?"))
+            print("Shunt resistance ON [kOhm]:", shunt_res_on/1000)
+
+            self.send_command("ROUT:CLOSe (@112)")  # close relays 112, 113 to connect the relay on the resistance board
+            self.send_command("ROUT:CLOSe (@113)")  # this switches off the 9.5V power used for R measurements
+            time.sleep(5)  # wait for relay to switch and current to decay
+
+            self.mode = DAQ6510.MODE_SENSE_CURRENT
+
+            shunt_res_off = float(self.send_query("READ?"))
+            print("Shunt resistance OFF [kOhm]:", shunt_res_off/1000)
+
+            self.send_command("ROUT:OPEN (@112)")  # close relays 112, 113 to connect the relay on the resistance board
+            self.send_command("ROUT:OPEN (@113)")  # this switches off the 9.5V power used for R measurements
+
+        # np.set_printoptions(formatter={'float': '{: 0.3f}'.format})  # set print format for arrays
+        #
+        # self.mode = DAQ6510.MODE_SENSE_RESISTANCE
+        #
+        # # check the source voltage
+        # v_source = data[:, 0]
+        # if np.any(v_source < 9) or np.any(v_source > 10):
+        #     msg = "Source voltage for resistance measurement is outside the expected range: {}V".format(v_source)
+        #     self.logging.warning(msg)
+        # else:
+        #     self.logging.debug("Source voltage for resistance measurement is {}V".format(v_source))
+        #
+        # data = data[:, 1:]  # don't need the reference voltage anymore
+        #
+        # data = np.reshape(data, (n_measurements, n_deas, 2))
+        # Vshunt = data[:, :, 0]
+        # VDEA = data[:, :, 1]
+        # Rshunt = 100000  # 100kOhm  TODO: read in real calibration data
+        #
+        # Ishunt = Vshunt / Rshunt
+        # RDEA = VDEA / Ishunt
+
+        # self.logging.debug("Applied current: {} µA".format(np.array2string(Ishunt * 1000000, precision=2)))
+        # self.logging.debug("Voltage across electrode: {} V".format(np.array2string(VDEA, precision=3)))
+        # self.logging.debug("Electrode resistance: {} kΩ".format(np.array2string(RDEA / 1000, precision=3)))
+        #
+        # RDEA = np.mean(RDEA, axis=0)  # take avg even for single measurement to reduce to 1-D array
+        # self.logging.debug("Average resistance: {} kΩ".format(np.array2string(RDEA / 1000, precision=3)))
+
+        # return RDEA
+        return np.array((shunt_res_on, shunt_res_off))
 
     def measure_current(self, nplc=1):
         """
@@ -433,8 +531,9 @@ class DAQ6510:
 
 def test_resistance_measurement():
     daq = DAQ6510(auto_connect=True)
-    res = daq.measure_DEA_resistance(range(6), n_measurements=1, nplc=1)
-    print("Result:", np.array2string(res / 1000, precision=2))
+    # res = daq.measure_DEA_resistance(range(6), n_measurements=1, nplc=1)
+    res = daq.measure_DEA_resistance_with_checks([0], n_measurements=1, nplc=1)
+    print("Result [kOhm]:", np.array2string(res / 1000, precision=2))
 
 
 def test_current_measurements(nplc=1):
@@ -1194,10 +1293,10 @@ if __name__ == '__main__':
     # for n_m, n_plc in zip(n_meas, nplcs):
     #     test_resistance_measurements(n_m, n_plc)
 
-    # test_resistance_measurement()
+    test_resistance_measurement()
     # for nplc in [1]:
     #     test_current_measurements(nplc)
-    measure_resistance_sequence()
+    # measure_resistance_sequence()
     # test_digitize_current()
     # test_digitize_voltage()
     # test_time_synchronisation()
