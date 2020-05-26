@@ -172,18 +172,13 @@ class SetupDialog(QtWidgets.QDialog):
         self.num_ac_frequency.valueChanged.connect(self.updateCycles)
         formLay.addRow("Cycle frequency [Hz]:", self.num_ac_frequency)
 
+        # create measurement period selector
+        self.num_ac_wait = self.create_num_selector(0, 1000, "ac_wait_before_measurement_s", 10)
+        formLay.addRow("Pause before measurement (s):", self.num_ac_wait)
+
         # create number of cycles indicator
         self.lbl_cycles = QtWidgets.QLabel("")
         formLay.addRow("", self.lbl_cycles)
-
-        # apply default to AC checkbox and enable or disable frequency selector accordingly
-        if "AC_mode" in self._defaults:
-            checked = self._defaults["AC_mode"]
-        else:
-            checked = False
-        self.chk_ac.setChecked(checked)
-        self.num_ac_frequency.setEnabled(checked)
-        self.updateCycles()
 
         # create grid layout to show all the images
         gridLay = QtWidgets.QGridLayout()
@@ -314,6 +309,14 @@ class SetupDialog(QtWidgets.QDialog):
         self.refresh_comports()  # fill with available ports
         self.refresh_multimeters()  # fill with available multimeters
 
+        # apply default to AC checkbox and enable or disable frequency selector accordingly
+        if "ac_mode" in self._defaults:
+            checked = self._defaults["ac_mode"]
+        else:
+            checked = False
+        self.chk_ac.setChecked(checked)
+        self.chkACClicked()  # enable/disableAC mode settings and show correct schematic
+
         # self.setWindowFlags(Qt.Window)
         self.show()
 
@@ -373,9 +376,11 @@ class SetupDialog(QtWidgets.QDialog):
     def chkACClicked(self):
         if self.chk_ac.isChecked():
             self.num_ac_frequency.setEnabled(True)
+            self.num_ac_wait.setEnabled(True)
             self.schematic.setPixmap(self.pix_schematic_AC)
         else:
             self.num_ac_frequency.setEnabled(False)
+            self.num_ac_wait.setEnabled(False)
             self.schematic.setPixmap(self.pix_schematic_DC)
         self.updateCycles()
 
@@ -411,7 +416,7 @@ class SetupDialog(QtWidgets.QDialog):
                 self.btn_apply_voltage.setEnabled(False)
                 self.btn_apply_voltage.setChecked(False)
             else:
-                self._hvps.open(port_idx, connection_timeout=0)
+                self._hvps.open(port_idx, reconnect_timeout=0)
                 self.lbl_switchboard_status.setText("Connected")
                 self.btn_apply_voltage.setEnabled(True)
         except Exception as ex:
@@ -512,7 +517,7 @@ class SetupDialog(QtWidgets.QDialog):
 
         refs = []
         for i in range(self._n_deas):
-            fpath = os.path.join(dir_path, "DEA {}".format(i), "Images")
+            fpath = os.path.join(dir_path, "DEA {}".format(i + 1), "Images")
             if os.path.isdir(fpath):
                 try:
                     files = os.listdir(fpath)
@@ -552,6 +557,8 @@ class SetupDialog(QtWidgets.QDialog):
             except TimeoutError:
                 self.logging.warning("Unable to set voltage. Refreshing com ports to check connection.")
                 self.refresh_comports()
+
+            self.logging.debug("Waiting 1 s after voltgae change to give DEAs time to respond")
             time.sleep(1)  # wait another second for DEA to respond
             # capture new images to show strain
             self.btnCaptureClicked()
@@ -690,6 +697,7 @@ class SetupDialog(QtWidgets.QDialog):
             "save_image_period_min": self.num_save_image_period.value(),
             "ac_mode": self.chk_ac.isChecked(),
             "ac_frequency_hz": self.num_ac_frequency.value(),
+            "ac_wait_before_measurement_s": self.num_ac_wait.value(),
             "average_images": self.num_avg_img.value()
         }
 

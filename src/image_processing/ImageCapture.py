@@ -306,13 +306,21 @@ class ImageCapture:
 
         self.logging.info("{} cameras found".format(self._camera_count))
 
+        # discard the first few sets of images. They tend to be rubbish
+        for i in range(10):
+            time.sleep(0.1)
+            self.grab_images()  # no need to retrieve, we just want the cameras to get warmed up (adjust exposure, etc.)
+
         # call new set callback since the first full set of images is now available
         if self.new_set_callback is not None:
             self.new_set_callback(self.get_images_from_buffer(), self.get_timestamps())
 
     def reconnect_cameras(self):
         self.logging.info("attempting to reconnect cameras")
-        # TODO: handle camera selection
+
+        if not self.auto_reconnect:
+            self.logging.critical("Connection to cameras lost and auto reconnect is disabled. Shutting down...")
+            raise Exception("Connection to cameras lost")
 
         prev_count = self._camera_count
         prev_available = len(self._cameras_available)
@@ -320,30 +328,38 @@ class ImageCapture:
         prev_names = self._camera_names
         state = self._camera_states
 
-        self.close_cameras()
-        time.sleep(5)
+        while self._reconnect_attempt < self.max_reconnect_attempts:  # don't keep reconnecting forever
+            self._reconnect_attempt += 1
+            self.logging.info("Reconnecting cameras (attempt {})...".format(self._reconnect_attempt))
 
-        self.find_cameras()
-        new_count = self._camera_count
+            self.close_cameras()
+            time.sleep(5)  # wait for cams to close properly before we try to reconnect. Might cause trouble otherwise.
 
-        cams_lost = prev_available - new_count
-        cams_failed = state.count(False)
+            self.find_cameras()
+            new_count = self._camera_count
 
-        if cams_lost is 0:
-            if prev_selection is not None:
-                self.select_cameras(prev_selection)
-                self.set_camera_names(prev_names)
-            self.logging.info("Cameras successfully reconnected")
-        elif cams_lost is cams_failed:  # we can match the failure to the lost camera
-            i_failed = [i for i, x in enumerate(state) if x is False]
-            for i in i_failed:
-                self._cameras.insert(i, Camera(100))  # insert dummy camera. safe to assume camera 100 doesn't exist
-        else:
-            self.logging.info("Don't know what to do here. Going to try and carry on as if nothing happened...")
-            if prev_selection is not None:
-                self.select_cameras(prev_selection)
-                self.set_camera_names(prev_names)
-            # TODO: deal with unknown cameras
+            cams_lost = prev_available - new_count
+            cams_failed = state.count(False)
+
+            if cams_lost is 0:
+                self.logging.info("Cameras successfully reconnected")
+                if prev_selection is not None:
+                    self.select_cameras(prev_selection)
+                    self.set_camera_names(prev_names)
+                self._reconnect_attempt = 0  # reset attempt count so we start again from 0 next time cameras are lost
+                return
+            elif cams_lost == cams_failed:  # we can match the failure to the lost camera
+                # TODO: check if this even works...
+                i_failed = [i for i, x in enumerate(state) if x is False]
+                for i in i_failed:
+                    self._cameras.insert(i, Camera(100))  # insert dummy camera. safe to assume camera 100 doesn't exist
+            else:
+                self.logging.info("Not all cameras reconnected. Try again...")
+                # TODO: deal with unknown cameras
+
+        # if we reached here, all attempts have failed
+        self.logging.critical("Failed to reconnect cameras. Shutting down...")
+        raise Exception("Connection to cameras lost")
 
     def select_cameras(self, camera_ids):
 
@@ -378,6 +394,10 @@ class ImageCapture:
         :return: a list of flags to indicate if each grab succeeded
         """
         self._camera_states = [cam.grab() for cam in self._cameras]
+        if False in self._camera_states:
+            self.logging.warning("Unable to grab images")
+            self.reconnect_cameras()
+
         return self._camera_states
 
     def retrieve_images(self):
@@ -403,25 +423,7 @@ class ImageCapture:
             self.find_cameras()
 
         self.grab_images()
-
-        if False in self._camera_states:
-            self.logging.warning("Unable to grab images")
-            if self.auto_reconnect and self._reconnect_attempt < self.max_reconnect_attempts:
-                self._reconnect_attempt += 1  # turn off so we don't keep reconnecting forever
-                self.logging.info("Reconnecting cameras (attempt {})...".format(self._reconnect_attempt))
-                self.reconnect_cameras()
-                frames = self.read_images()  # try again reading a new set of images
-                # this will also flush the images grabbed during reconnect, which tend to be white
-            else:
-                if self._reconnect_attempt > 0:
-                    self.logging.critical("Failed to reconnect cameras. Shutting down...")
-                else:  # this means auto reconnect is off
-                    self.logging.critical("Connection to cameras lost and auto reconnect is disabled. Shutting down...")
-                raise Exception("Connection to cameras lost")
-        else:
-            # all well, reconnect (if there was one) has succeeded, so we can reset the attempt counter
-            self._reconnect_attempt = 0
-            sucs, frames = self.retrieve_images()
+        sucs, frames = self.retrieve_images()
 
         if self.new_set_callback is not None:
             self.new_set_callback(frames, self.get_timestamps())

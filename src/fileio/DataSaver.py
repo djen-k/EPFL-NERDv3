@@ -7,7 +7,7 @@ class DataSaver:
     def __init__(self, active_deas, outFilename="testing.csv", overwrite=False):
         """
         Constructor for DataSaver class
-        :param nbDea: Number of DEAs ^m used to generate the right number of fields
+        :param active_deas: Number of DEAs;  used to generate the right number of fields
         :param outFilename: filename + path of the csv file in which we'll write.
         :param overwrite: Is overwriting a file allowed or not ?
         """
@@ -29,7 +29,7 @@ class DataSaver:
         # self.mutex = QMutex()
 
         # create data fields and header
-        self.dataFields = ["timestamp", "elapsed_time", "time_at_max_V",
+        self.dataFields = ["timestamp", "elapsed_time", "time_at_max_V", "total_cycles",
                            "test_state", "target_voltage", "measured_voltage",
                            "leakage_current", "partial_discharge_freq", "partial_discharge_mag"]
 
@@ -49,7 +49,7 @@ class DataSaver:
 
         # define units
 
-        self.units = ["[datetime]", "[s]", "[s]", "[0: Ramp, 1: High, 2: Low]", "[V]", "[V]", "[A]", "[1/s]", "[A]"]
+        self.units = ["[datetime]", "[s]", "[s]", "", "[0: Ramp, 1: High, 2: Low]", "[V]", "[V]", "[A]", "[1/s]", "[A]"]
         for i in active_deas:
             self.units.append("[1: OK, 0: Failed]")
             self.units.append("[1: OK, 0: Failed]")
@@ -74,7 +74,8 @@ class DataSaver:
         self.logging.debug("write headers")
         self.file.flush()
 
-    def write_data(self, timestamp, elapsed_time, time_at_max_V, test_state, target_voltage, measured_voltage,
+    def write_data(self, timestamp, elapsed_time, time_at_max_V, total_cycles, test_state, target_voltage,
+                   measured_voltage,
                    electrical_state=None, visual_state=None, strain_AXYa=None, center_shift=None, resistance=None,
                    leakage_current=None, pd_freq=None, pd_mag=None, image_saved=False):
 
@@ -83,6 +84,7 @@ class DataSaver:
         data["timestamp"] = timestamp.strftime("%d/%m/%Y %H:%M:%S")  # formatted to be interpretable by Excel
         data["elapsed_time"] = elapsed_time
         data["time_at_max_V"] = time_at_max_V
+        data["total_cycles"] = total_cycles
         data["test_state"] = test_state
         data["target_voltage"] = target_voltage
         data["measured_voltage"] = measured_voltage

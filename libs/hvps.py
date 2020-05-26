@@ -134,12 +134,12 @@ class HVPS:
                 try:
                     info = self.open_hvps(info, with_continuous_reading=False)
                     self.close()
-                except:
+                except Exception as ex:
                     self.logging.critical(
-                        "Unable to open COM port %s. Unrecognized device or unsupported firmware version." % ser.device)
+                        "Unable to open COM port {}: {}".format(ser.device, ex))
                 else:
                     if info is not None:
-                        self.logging.info("Device %s found at port %s" % (info.name, info.port))
+                        self.logging.info("Device {} found at port {}".format(info.name, info.port))
                         self.hvps_available_ports.append(info)
         self.logging.info("HVPS Detection done")
         return self.hvps_available_ports
@@ -267,23 +267,23 @@ class HVPS:
 
     def set_voltage(self, voltage):  # sets the output voltage
         """Sets the output voltage"""
-        self.logging.debug("Set voltage setpoint to %d V" % voltage)
         self._write_hvps(b'SVset %d\r' % voltage)
         res = self._cast_int(self._read_hvps())
+        self.logging.debug("Set voltage setpoint to {} V. Response: {} V".format(voltage, res))
         return res
 
     def get_voltage_setpoint(self):
         """Queries voltage setpoint"""
-        self.logging.debug("Querying device voltage set point")
         self._write_hvps(b'QVset\r')
         res = self._cast_int(self._read_hvps())
+        self.logging.debug("Querying device voltage set point. Response: %d V" % res)
         return res
 
     def get_current_voltage(self):
         """Queries voltage output"""
-        self.logging.debug("Querying device current voltage")
         self._write_hvps(b'QVnow\r')
         res = self._cast_int(self._read_hvps())
+        self.logging.debug("Querying device current voltage. Response: %d V" % res)
         return res
 
     def set_pwm(self, pwm_value):  # sets the pwm value
@@ -309,16 +309,16 @@ class HVPS:
         For example SF 0.5 to set the frequency to 0.5 Hz.
         The value returned is the new frequency, taking quantification into account.
         min freq is 0.001Hz max is 5000Hz"""
-        self.logging.debug("Set device frequency to %.3f" % frequency)
         self._write_hvps(b'SF %.3f\r' % frequency)
         res = self._cast_float(self._read_hvps())
+        self.logging.debug("Set device frequency to {:.3f}. Response: {:.3f}".format(frequency, res))
         return res
 
     def get_frequency(self):  # queries the frequency
         """Queries the switching frequency. The returned value is in Hz."""
-        self.logging.debug("Querying device current frequency value")
         self._write_hvps(b'QF\r')
         res = self._cast_float(self._read_hvps())
+        self.logging.debug("Querying device current frequency value. Response: %.3f" % res)
         return res
 
     def set_cycle_number(self, cycle_number):
@@ -331,9 +331,9 @@ class HVPS:
         in switching mode (mode 2).
         When you issue a SCycle command, the cycle counter is reset to 0.
         Example: SCycle 1000 to switch 1000 times at the selected frequency and then stop."""
-        self.logging.debug("Set device cycle number to %d" % cycle_number)
         self._write_hvps(b'SCycle %d\r' % cycle_number)
         res = self._cast_int(self._read_hvps())
+        self.logging.debug("Set device cycle number to {}. Response: {}".format(cycle_number, res))
         return res
 
     def get_cycle_number(self):
@@ -345,10 +345,16 @@ class HVPS:
         self.logging.debug("Get device cycle number and current cycle")
         self._write_hvps(b'QCycle\r')
         res = self._read_hvps()
-        res = res.decode("utf-8")
-        res = res.split("/")
-        res = [self._cast_int(i) for i in res]
-        self.logging.debug("Cycle %d/%d" % (res[0], res[1]))
+        try:
+            res = res.decode("utf-8")
+            self.logging.debug("Response: " + res)
+            res = res.split("/")
+            res = [self._cast_int(i) for i in res]
+            self.logging.debug("Cycle %d/%d" % (res[0], res[1]))
+        except Exception as ex:
+            res = [-1, -1]
+            self.logging.error("Unable to parse cycle number: {}".format(ex))
+            self.logging.debug("Returning cycle {}/{}".format(res[0], res[1]))
         return res
 
     def set_switching_mode(self, switching_mode):
@@ -360,9 +366,9 @@ class HVPS:
         Setting the switching mode is only effective if the switching source
         is 0 (onboard switching).
         Example: SSwMode 1 to set the HVPS in DC mode"""
-        self.logging.debug("Set device switching mode to %d" % switching_mode)
         self._write_hvps(b'SSwMode %d\r' % switching_mode)
         res = self._cast_int(self._read_hvps())
+        self.logging.debug("Set device switching mode to {}. Response: {}".format(switching_mode, res))
         return res
 
     def set_output_off(self):
@@ -383,9 +389,9 @@ class HVPS:
             1 the HVPS is in DC mode with a constant output voltage at the desired setpoint,
             2, the HVPS is switching at the desired frequency between 0V and Vset.
             3, the HVPS is in user-defined waveform mode."""
-        self.logging.debug("Get Device switching mode")
         self._write_hvps(b'QSwMode\r')
         res = self._cast_int(self._read_hvps())
+        self.logging.debug("Get Device switching mode. Result: {}".format(res))
         return res
 
     def set_switching_source(self, switching_source):
@@ -418,7 +424,7 @@ class HVPS:
             2 internal open loop control (on-board regulator disconnected)."""
         self._write_hvps(b'SVMode %d\r' % voltage_control_mode)
         res = self._cast_int(self._read_hvps())
-        self.logging.debug("Device voltage control mode set to %d. Result: %d." % (voltage_control_mode, res))
+        self.logging.debug("Device voltage control mode set to {}. Result: {}.".format(voltage_control_mode, res))
         return res
 
     def get_voltage_control_mode(self):  # queries the switching source

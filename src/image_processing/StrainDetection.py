@@ -68,7 +68,7 @@ class StrainDetector:
         """
 
         n_img = len(imgs)
-
+        # TODO: keep old masks if new masks are rubbish
         # TODO: make sure the algorithm is robust to Nones
         if self._reference_images is not None and n_img != len(self._reference_images):
             raise Exception("Need to specify one image for each reference image! Set elements to None where no image is"
@@ -666,6 +666,9 @@ def visualize_result(img, ellipse, radii=None, angles=None, reference_ellipse=No
 
 
 def draw_state_visualization(img, visual, electrical):
+    if img is None:
+        return None
+
     r = 20
     margin = 20
     font = cv.FONT_HERSHEY_SIMPLEX

@@ -4,3 +4,18 @@
 18/05/2020 - Setup Dialog: Settings are saved even if dialog is closed without starting a test
 18/05/2020 - Setup Dialog: Take new image and record strain reference buttons now disable while busy, prefenting impatient clicks
 18/05/2020 - Switchboard: Made min voltage a Switchboard property. Changed set_voltage_no_overshoot to only activate when above the min voltage. Increased threshold and timeout when waiting for voltage to reach the set point to avoid false positives in fault detection.
+23/05/2020 - Setup Dialog: Added field for wait time before measurement in AC mode
+23/05/2020 - Main: implemented use of stored wait time before measurement in AC mode
+23/05/2020 - Setup Dialog: fixed bug that causes error when loading strain reference from previous test with a full set of 6 DEAs
+23/05/2020 - Main/Data saver: record total number of cycles
+23/05/2020 - Main: Fixed bugs: AC frequency not getting set correctly; high phase transitioning immediatly back to low
+24/05/2020 - Switchboard: Fixed timeout, which was set to 0 (no reconnection attempts) by default instead of -1 (infinite reconnection attempts)
+24/05/2020 - Main: Fixed maximum number of cycles (for AC mode), which was set to 65535 (max int16) and which causes the switchboard to never stop cycling because the current cycle number overflows so it's never larger than 65535. Now set to 65000 to give it enough margin.
+25/05/2020 - Keithley: Added reconnect function so the instrument automatically reconnects and software doesn't crash if connection is lost at any point
+25/05/2020 - hvps: Fixed bug when reading cycle number that causes a crash if reading is invalid
+25/05/2020 - Image Capture: fixed reconnection which didn't trigger if images are only grabbed but not retrieved. Now, reconnection triggers if any grab fails (but only when grabbing a set with 'grab_images', not for a single grab).
+25/05/2020 - Main: set HVPS parameters on every cycle to make sure we get back on track if the HVPS resets
+25/05/2020 - Main: Make sure relays get reconnected in auto mode after HVPS resets
+26/05/2020 - Switchboard: Fixed the set voltage wait until reached method so it waits while the switchboard is testing for shorts
+26/05/2020 - Main: Keep track of completed cycles properly and make sure all requested cycles (and not more) are completed even in case of a reset/disconnect
+26/05/2020 - Main: Change the wait high before measurement phase so it still actvely monitors the DEAs in that time

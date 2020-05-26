@@ -16,21 +16,22 @@ class SwitchBoard(HVPS):
         super().__init__()
         self.logging = logging.getLogger("Switchboard")  # change logger to "Switchboard"
         self.continuous_voltage_reading_flag = Event()
-        self.connection_timeout = -1
+        self.reconnect_timeout = -1
         self.t_0 = None
 
         self.minimum_voltage = 300  # could add option to query the switchboard but we'll stick with this for now
+        self.maximum_voltage = 5000  # we'll query the actual switchboard for max voltage later
 
     def __del__(self):
         try:
-            self.set_voltage(0, block_until_successful=True)
+            self.set_voltage(0, block_while_testing=True)
             self.set_relays_off()
         except Exception as ex:
             self.logging.warning("Unable to switch off the relays: {}".format(ex))
 
         super().__del__()
 
-    def open(self, com_port=None, with_continuous_reading=False, connection_timeout=0):
+    def open(self, com_port=None, with_continuous_reading=False, reconnect_timeout=-1):
         """
         Open a connection to a physical switchboard at the given COM port. The port can be specified as a string
         (COM port name), a HvpsInvo object or an index. If specified as an index, the respective port in this
@@ -38,7 +39,7 @@ class SwitchBoard(HVPS):
         :param com_port: The COM port to connect to. Can be a string, HvpsInfo, int or None
         :param with_continuous_reading: Specify if the SwitchBoard should launch a thread to record continuous voltage
         readings
-        :param connection_timeout: Optional timeout parameter to specify for how long the HVPS should attempt
+        :param reconnect_timeout: Optional timeout parameter to specify for how long the HVPS should attempt
         reconnecting if the connection is lost. Set -1 to disable (i.e. keep trying to reconnect indefinitely).
         If the timeout expires before the connection can be reastablished, the COM port is closed but no error
         is generated. Check "is_open" regularly to ensure that the device is still connected.
@@ -64,6 +65,7 @@ class SwitchBoard(HVPS):
         else:  # you had one job: giving the correct COM port, and you failed!
             logging.critical("Unable to connect to HVPS, ensure it's connected")
             # raise Exception
+            return
 
         # ensure we have a compatible HVPS, correctly connected and configured
         hvps_type = (self.get_hvps_type() == "slave")  # until when is the term "slave" politically correct ?
@@ -78,12 +80,14 @@ class SwitchBoard(HVPS):
         if version != 1:
             logging.critical("HVPS firmware version is: {}. Only tested with version 7".format(version))
 
-        # select DC and output OFF
+        # set everything OFF
         self.set_switching_source(0)  # on-board switching
         self.set_switching_mode(0)  # OFF
         self.set_voltage(0)
+        self.set_relays_off()
 
-        self.connection_timeout = connection_timeout
+        self.maximum_voltage = self.get_maximum_voltage()  # we'll store this here since it's not likely to change
+        self.reconnect_timeout = reconnect_timeout
 
     def close(self):
         """Closes connection with the HVPS"""
@@ -91,7 +95,7 @@ class SwitchBoard(HVPS):
         time.sleep(0.1)
         self.serial_com_lock.acquire()
         if self.ser.is_open:
-            self.set_voltage(0, block_until_successful=True)  # set the voltage to 0 as a safety measure
+            self.set_voltage(0, block_while_testing=True)  # set the voltage to 0 as a safety measure
             self.set_relays_off()
             self.ser.close()
         self.is_open = False
@@ -124,42 +128,66 @@ class SwitchBoard(HVPS):
         res = self._parse_relay_state(self._read_hvps())
         return res
 
-    def set_voltage(self, voltage, block_until_successful=False, block_until_reached=False):  # sets the output voltage
+    def set_voltage(self, voltage, block_while_testing=False, block_until_reached=False):  # sets the output voltage
         """
         Sets the output voltage.
         Checks if voltage can be set or if switchboard is currently testing for a short circuit
         :param voltage: The desired output voltage
-        :param block_until_successful: Flag to indicate if the function should block until the voltage can be set. The voltage
-        set point cannot be changed while the switchboard is testing for short circuits. Set this to True, if you want
-        the function to block until the switchboard has finished testing (if it was). If false, the function
-        may return without having set the voltage. Check response from switchboard!
+        :param block_while_testing: Flag to indicate if the function should block until the voltage can be set.
+        The voltage set point cannot be changed while the switchboard is testing for short circuits.
+        Set this to True, if you want the function to block until the switchboard has finished testing (if it was).
+        If false, the function may return without having set the voltage. Check response from switchboard!
         :param block_until_reached: Flag to indicate if the function should block until the measured voltage matches the
         voltage set point (with a 10V margin). If the set point is not reached within 3s, a TimeoutError is raised.
         :return: True if the voltage was set successfuly, false if the switchboard was unable to set the voltage because
         it was busy testing for a short circuit or some other error occurred. If 'block_if_testing' is True,
         a False return value indicates an unexpected error.
         """
-        # if we want to wait until reached, also have to wait until V has been set
-        if block_until_successful or block_until_reached:
+
+        if block_until_reached:
+            block_while_testing = True  # it can't reach if it's not set successfully
+
+        # check that specified voltage is within the allowed range #######################################
+
+        if voltage != 0 and voltage < self.minimum_voltage:
+            msg = "Specified voltage ({}) is below the allowed minimum ({}). Setting voltage to 0!"
+            self.logging.warning(msg.format(voltage, self.minimum_voltage))
+            voltage = 0
+
+        if voltage > self.maximum_voltage:
+            msg = "Specified voltage ({}) is above the allowed maximum ({}). Setting voltage to {}}!"
+            self.logging.warning(msg.format(voltage, self.maximum_voltage, self.maximum_voltage))
+            voltage = self.maximum_voltage
+
+        # make sure that the new voltage set point was accepted (it won't be while it's testing) ###############
+
+        if block_while_testing:
             if self.is_testing():
                 self.logging.debug("Switchboard is busy testing for shorts. Waiting to set voltage...")
             while self.is_testing():
                 time.sleep(0.1)
 
-        ret = super().set_voltage(voltage)
-        if block_until_reached:
-            timeout = 5  # if voltage has not reached its set point in 5 s, something must be wrong!
-            start = time.perf_counter()
-            elapsed = 0
-            while abs(voltage - self.get_current_voltage()) > 50:
-                if elapsed > timeout:
-                    raise TimeoutError("Voltage has not reached the set point after 3 seconds! Please check the HVPS!")
-                if elapsed == 0:  # only write message once
-                    self.logging.debug("Waiting for measured output voltage to reach the set point...")
-                time.sleep(0.01)
+        res = super().set_voltage(voltage)
+
+        if not block_until_reached:  # don't wait, return immediately
+            return res == voltage
+
+        timeout = 5  # if voltage has not reached its set point in 5 s, something must be wrong!
+        start = time.perf_counter()
+        elapsed = 0
+        while abs(voltage - self.get_current_voltage()) > 50:
+            if elapsed > timeout:
+                msg = "Voltage has not reached the set point after 5 seconds! Please check the HVPS!"
+                raise TimeoutError(msg)
+            if elapsed == 0:  # only write message once
+                self.logging.debug("Waiting for measured output voltage to reach the set point...")
+            time.sleep(0.05)
+            if self.is_testing():
+                start = time.perf_counter()  # if SB is busy checking for shorts, don't start counting timeout
+            else:
                 elapsed = time.perf_counter() - start
 
-        return ret == voltage
+        return True  # if we reached here, it must have been set correctly
 
     def set_voltage_no_overshoot(self, voltage):
         """
@@ -194,9 +222,10 @@ class SwitchBoard(HVPS):
         Checks if the switchboard is currently testing for a short circuit
         :return: True, if the switchboard is currently busy testing
         """
-        self.logging.debug("Query if switchbaord is testing")
         self._write_hvps(b'QTestingShort\r')
-        return self._read_hvps() is b'1'
+        res = self._read_hvps() == b'1'
+        self.logging.debug("Query if switchbaord is testing. Response: {}".format(res))
+        return res
 
     def set_relays_on(self, relays=None):
         """
@@ -242,12 +271,17 @@ class SwitchBoard(HVPS):
 
     def _parse_relay_state(self, str_state):
         try:
+            self.logging.debug("Parsing relay state: {}".format(str_state))
             state = str_state[14:-1].split(b',')  # separate response for each relay
             state = [self._cast_int(r) for r in state]  # convert all to int
         except Exception as ex:
             self.logging.debug("Failed to parse relay state: {}".format(ex))
-            return str_state  # return the original message so as not to withhold information
-        return state
+            return None  # return None to indicate something is wrong
+
+        if len(state) == 6:  # output is only valid if there is a state for each relay
+            return state
+        else:
+            return None  # return None to indicate something is wrong
 
     def dirty_reconnect(self):
         self.ser.close()
@@ -259,11 +293,11 @@ class SwitchBoard(HVPS):
             except Exception as ex:
                 self.logging.debug("Connection error: {}".format(ex))
                 elapsed = time.perf_counter() - start
-                if self.connection_timeout < 0 or elapsed < self.connection_timeout:  # no timeout or not yet expired
+                if self.reconnect_timeout < 0 or elapsed < self.reconnect_timeout:  # no timeout or not yet expired
 
                     msg = "Reconnection attempt failed!"
-                    if self.connection_timeout == 0:
-                        msg += " Will keep trying for {} s".format(int(round(self.connection_timeout - elapsed)))
+                    if self.reconnect_timeout == 0:
+                        msg += " Will keep trying for {} s".format(int(round(self.reconnect_timeout - elapsed)))
                     else:
                         msg += " Will keep trying..."
                     self.logging.critical(msg)

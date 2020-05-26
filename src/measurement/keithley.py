@@ -114,6 +114,8 @@ class DAQ6510:
                 self.instrument_id = instrument_id
                 if reset:
                     self.reset()
+                else:
+                    self.mode = DAQ6510.MODE_UNKNOWN
 
                 self.instrument.clear()  # clear input buffer so we don't receive messages from a previous session
                 self._get_instrument_properties()
@@ -154,26 +156,94 @@ class DAQ6510:
     def is_connected(self):
         return self.instrument is not None
 
+    def reconnect(self, attempts=-1):
+        """
+        Try to reconnect to the instrument by disconnecting and connecting again to the same device. If unseccessful,
+        reconnection will be attempted for the specified number of times before aborting the effort.
+        :param attempts: The maximum number of reconnection attempts to perform. Set to -1 (default) to keep trying
+        indefinitely. If 0, no attempts are made and the instrument remains disconnected.
+        :return: True if the instrument was successfully reconnected, or False if after the specified number of attempts
+        reconnection was not successful.
+        """
+        attempts_performed = 0
+        inst_id = self.instrument_id  # remember current instrument ID so we can reconnect to the same one
+        while attempts < 0 or attempts_performed < attempts:
+            attempts_performed += 1
+            self.logging.debug("Trying to reconnect instrument...  (attempt {})".format(attempts_performed))
+            try:
+                self.disconnect()
+                connected = self.connect(inst_id, reset=False)
+                if connected:
+                    self.logging.debug("Reconnection successful.")
+                    return True
+                else:
+                    self.logging.debug("Reconnection attempt failed.")
+            except Exception as ex:
+                self.logging.debug("Reconnection attempt failed: {}".format(ex))
+            time.sleep(0.1)
+
+        self.logging.critical("Unable to reconnect after {} attempts. Instrument remains disconnected".format(attempts))
+        return False
+
     def send_command(self, command):
         if not self.is_connected():
             raise Exception("Not connected to any instrument")
-        self.logging.debug("Sending commend: {}".format(command))
-        self.instrument.write(command)
+        self.logging.debug("Sending command: {}".format(command))
+        try:
+            self.instrument.write(command)
+        except Exception as ex:
+            self.logging.error("Error receiving data: {}".format(ex))
+            if self.reconnect():
+                self.send_command(command)
 
     def send_query(self, command):
         if not self.is_connected():
             raise Exception("Not connected to any instrument")
         self.logging.debug("Sending query: {}".format(command))
-        res = self.instrument.query(command)
-        self.logging.debug("Response: {}".format(res))
-        return res
+        try:
+            res = self.instrument.query(command)
+            self.logging.debug("Response: {}".format(res))
+            return res
+        except Exception as ex:
+            self.logging.error("Error receiving data: {}".format(ex))
+            if isinstance(ex, visa.VisaIOError) and ex.error_code == -1073807339:
+                self.logging.debug("Timeout error. Not reconnecting. Returning None")
+                return None  # not due to lost connection - just have to try again next time
+            else:
+                if self.reconnect():
+                    return self.send_query(command)
+                else:
+                    return None  # reconnect failed. nothing else we can do
+
+    def query_data(self, command, data_points=0):
+        """
+        Sends the given command and receives numeric data in the active data format: ASCII ('s'), float
+         ('f') or double ('d') as set by 'set_data_format(...)' (ASCII is default).
+        Data is automatically interpreted and converted to a numpy array.
+        :param command: The command to send to the instrument.
+        :param data_points: The number of data points to read. Set 0 (default) if unknown.
+        :return: The data received from the instrument as a numpy array.
+        """
+        self.logging.debug("Sending data query: {}".format(command))
+        try:
+            if self.data_format:
+                return self.instrument.query_binary_values(command, datatype=self.data_format,
+                                                           container=np.array, data_points=data_points)
+            else:
+                return self.instrument.query_ascii_values(command, container=np.array)
+        except Exception as ex:
+            self.logging.error("Error receiving data: {}".format(ex))
+            if self.reconnect():
+                return self.query_data(command, data_points)
+            else:
+                return None
 
     def reset(self):
         """
         Reset the instrument to its default state by sending an 'RST' command.
         """
-        self.send_command("*RST")  # reset instrument to put it in a known state
         self.logging.debug("RESET")
+        self.send_command("*RST")  # reset instrument to put it in a known state
         self.mode = DAQ6510.MODE_DEFAULT
 
     def set_timeout(self, timeout_s):
@@ -235,22 +305,6 @@ class DAQ6510:
         # self.instrument.values_format.use_binary(data_format, False, np.array)
         self.data_format = data_format
 
-    def query_data(self, command, data_points=0):
-        """
-        Sends the given command and receives numeric data in the active data format: ASCII by default,
-        float or double if a binary data format was set (using 'use_binary()').
-        Data is automatically interpreted and converted to a numpy array.
-        :param command: The command to send to the instrument.
-        :param data_points: The number of data points to read. Set 0 (default) if unknown.
-        :return: The data received from the instrument as a numpy array.
-        """
-        self.logging.debug("Sending data query: {}".format(command))
-        if self.data_format:
-            return self.instrument.query_binary_values(command, datatype=self.data_format,
-                                                       container=np.array, data_points=data_points)
-        else:
-            return self.instrument.query_ascii_values(command, container=np.array)
-
     @staticmethod
     def timestamp_to_datetime(tstamp, t_offset=0):
         """
@@ -299,13 +353,12 @@ class DAQ6510:
 
         # self.send_command("*RST")
         self.send_command("FUNC 'VOLT:DC', {}".format(str_channels))
-        # self.send_command("VOLT:DC:RANG:AUTO ON, {}".format(str_channels))
-        self.send_command("VOLT:DC:RANGe 10, {}".format(str_channels))  # should give us >10GΩ input impedance
+        self.send_command("VOLT:DC:RANG:AUTO ON, {}".format(str_channels))  # doesn't take long so might as well
+        # self.send_command("VOLT:DC:RANGe 10, {}".format(str_channels))  # should give us >10GΩ input impedance
         if aperture is not None:
             self.send_command("VOLT:DC:APERture {}, {}".format(aperture, str_channels))
         else:
             self.send_command("VOLT:DC:NPLC {}, {}".format(nplc, str_channels))
-        self.send_query("VOLT:DC:NPLC? {}".format(str_channels))
         self.send_command("VOLT:DC:AZER OFF, {}".format(str_channels))
         self.send_command("AZERo:ONCE")  # zero once now before starting the scan
         self.send_command("ROUT:SCAN {}".format(str_channels))
@@ -317,15 +370,23 @@ class DAQ6510:
         i = 1
         start = time.perf_counter()
         elapsed = 0
-        while i < n_channels * n_measurements and elapsed < scan_timeout:
+        while i < n_channels * n_measurements:
+            if elapsed > scan_timeout:
+                self.logging.warning("Invalid measurement! "
+                                     "Timeout elapsed before the expected amount of data wa received. "
+                                     "Resetting instrument and returning 'None' result.")
+                self.reset()  # since the scan didn't finish, something went wrong so better reset for a fresh start
+                return None
             time.sleep(0.1)
-            i = int(self.send_query("TRACe:ACTual?"))
+            res = self.send_query("TRACe:ACTual?")
+            if res is None:
+                continue
+            i = int(res)
             elapsed = time.perf_counter() - start
 
-        data = self.send_query("TRACe:DATA? 1, {}, \"defbuffer1\", READ".format(i))
-        data = data.split(",")
-        data = [float(d) for d in data]
-        data = np.array(data)
+        data = self.query_data("TRACe:DATA? 1, {}, \"defbuffer1\", READ".format(i))
+        if data is None:
+            return None
         data = np.reshape(data, (n_measurements, n_channels))
 
         np.set_printoptions(formatter={'float': '{: 0.3f}'.format})  # set print format for arrays
@@ -389,7 +450,7 @@ class DAQ6510:
         self.send_command("VOLT:DC:NPLC 1, {}".format(str_channels))
         self.send_command("VOLT:DC:AZER ON, {}".format(str_channels))
         self.send_command("ROUT:CLOSe (@111)")
-        time.sleep(5)
+        time.sleep(1)
         v_source = float(self.send_query("READ?"))
         if np.any(v_source < 9) or np.any(v_source > 10):
             msg = "Source voltage for resistance measurement is outside the expected range: {}V".format(v_source)
@@ -400,24 +461,27 @@ class DAQ6510:
             print("Source voltage for resistance measurement is {}V".format(v_source))
 
         for dea in deas:
-            str_channels = "(@103)"  # .format(get_resistance_channels(dea))
+            str_channels = "(@106)"  # .format(get_resistance_channels(dea))
 
             self.logging.debug("Measuring resistance for DEA {} (channels: {})".format(deas, str_channels))
 
             self.send_command("FUNC 'RES', {}".format(str_channels))
-            self.send_command("ROUT:CLOSe (@103)")
-            time.sleep(5)
+            self.send_command("ROUT:CLOSe {}".format(str_channels))
+            time.sleep(1)
             shunt_res_on = float(self.send_query("READ?"))
-            print("Shunt resistance ON [kOhm]:", shunt_res_on/1000)
+            print("Shunt resistance ON [kOhm]:", shunt_res_on / 1000)
 
+            self.send_command("ROUT:CLOSe (@123)")  # make sure channels 101-110 are disconnected from 111-120
             self.send_command("ROUT:CLOSe (@112)")  # close relays 112, 113 to connect the relay on the resistance board
             self.send_command("ROUT:CLOSe (@113)")  # this switches off the 9.5V power used for R measurements
-            time.sleep(5)  # wait for relay to switch and current to decay
+            time.sleep(1)  # wait for relay to switch and current to decay
 
             self.mode = DAQ6510.MODE_SENSE_CURRENT
 
             shunt_res_off = float(self.send_query("READ?"))
-            print("Shunt resistance OFF [kOhm]:", shunt_res_off/1000)
+            print("Shunt resistance OFF [kOhm]:", shunt_res_off / 1000)
+
+            time.sleep(1)
 
             self.send_command("ROUT:OPEN (@112)")  # close relays 112, 113 to connect the relay on the resistance board
             self.send_command("ROUT:OPEN (@113)")  # this switches off the 9.5V power used for R measurements
@@ -474,7 +538,8 @@ class DAQ6510:
             # daq.send_command("SENS:CURR:DC:APERture 0.02, (@122)")
             # measurement aperture of 1-2 power line cycles gives the lowest noise (according to DAQ manual)
             self.send_command("SENS:CURR:DC:NPLC {}, (@122)".format(nplc))
-            self.send_command("SENS:CURR:DC:RANGe 100e-6, (@122)")
+            self.send_command("SENS:CURR:DC:RANGe:AUTO ON, (@122)")  # doesn't take long so might as well
+            # self.send_command("SENS:CURR:DC:RANGe 100e-6, (@122)")
             # daq.send_query("SENS:CURR:DC:APERture? (@122)")
 
             self.send_command("ROUT:CLOSe (@122)")  # close relays on current measurement channel
@@ -486,7 +551,11 @@ class DAQ6510:
             self.mode = DAQ6510.MODE_SENSE_CURRENT
 
         # perform a measurement
-        cur = float(self.send_query("READ?"))
+        res = self.send_query("READ?")
+        if res is None:
+            return None
+
+        cur = float(res)
 
         self.logging.debug("Measured current: {} A".format(cur))
 
@@ -531,9 +600,16 @@ class DAQ6510:
 
 def test_resistance_measurement():
     daq = DAQ6510(auto_connect=True)
-    # res = daq.measure_DEA_resistance(range(6), n_measurements=1, nplc=1)
-    res = daq.measure_DEA_resistance_with_checks([0], n_measurements=1, nplc=1)
+    # daq.logging.setLevel(logging.DEBUG)
+    res = daq.measure_DEA_resistance(range(6), n_measurements=1, nplc=1)
+    # res = daq.measure_DEA_resistance_with_checks([0], n_measurements=1, nplc=1)
     print("Result [kOhm]:", np.array2string(res / 1000, precision=2))
+
+
+def test_current_measurement_simple():
+    daq = DAQ6510(auto_connect=True)
+    res = daq.measure_current(nplc=1)
+    print("Result [mA]:", res * 1000)
 
 
 def test_current_measurements(nplc=1):
@@ -1292,8 +1368,9 @@ if __name__ == '__main__':
     # n_meas = [10, 135, 440]
     # for n_m, n_plc in zip(n_meas, nplcs):
     #     test_resistance_measurements(n_m, n_plc)
-
+    logging.basicConfig(level=logging.DEBUG)
     test_resistance_measurement()
+    # test_current_measurement_simple()
     # for nplc in [1]:
     #     test_current_measurements(nplc)
     # measure_resistance_sequence()

@@ -132,7 +132,10 @@ class NERD:
         min_voltage = self.hvps.minimum_voltage
         # TODO: check why min voltage is 300 V (officially 50, but doesn't always seem to work)
         nsteps = self.config["steps"]
-        voltage_step = max_voltage / nsteps  # can be fractional, will be rounded when voltage is set
+        if nsteps == 0:
+            voltage_step = 0
+        else:
+            voltage_step = max_voltage / nsteps  # can be fractional, will be rounded when voltage is set
 
         duration_low_s = self.config["low_duration_s"]
         duration_high_s = self.config["high_duration_min"] * 60  # convert to seconds
@@ -144,7 +147,8 @@ class NERD:
         ac_frequency = self.config["ac_frequency_hz"]
         ac_cycle_count = np.ceil(duration_high_s * ac_frequency)
         ac_cycle_count = max(ac_cycle_count, 1)  # make sure it's at least 1, otherwise the HVPS will cycle indefinitely
-        ac_wait_before_measurement = 5  # self.config["ac_wait_before_measurement_s"]
+        ac_cycle_count = min(ac_cycle_count, 65000)  # make sure it doesn't exceed max value the HVPS can store
+        ac_wait_before_measurement = self.config["ac_wait_before_measurement_s"]
 
         # set up state machine #############################################################
 
@@ -168,6 +172,10 @@ class NERD:
         dea_state_el = None  # previous electrical state - to check if a DEA failed
         breakdown_occurred = False
         failed_deas = []
+        cycles_completed = 0
+        total_cycles = 0
+        ac_finished = False  # indicates if the current set of cycles was completed
+        ac_paused = False  # indicated if cycling is currently paused (for measurement or breakdown detection)
 
         # record start time
         now = time.perf_counter()
@@ -176,6 +184,7 @@ class NERD:
         time_last_image_saved = now
         time_last_measurement = now
         time_last_voltage_measurement = now
+        time_pause_started = -1
         duration_at_max_V = 0
 
         # TODO: set switching mode in DC mode
@@ -192,27 +201,43 @@ class NERD:
             # ------------------------------
             dt_state_change = now - time_last_state_change  # time since last state change
 
-            if ac_mode:
-                cycles_completed = self.hvps.get_cycle_number()  # check how many cycles have been completed
-            else:
-                cycles_completed = None
-
             if current_state == STATE_STARTUP:
                 self.logging.info("Starting up state machine")
             elif current_state == STATE_WAITING_LOW:
                 msg = "waiting low: {:.0f}/{}s".format(dt_state_change, duration_low_s)
                 self.logging.info(msg)
             elif current_state == STATE_RAMP:
+                self.hvps.set_voltage(current_target_voltage)
+                self.hvps.set_switching_mode(1)
                 msg = "Step {}/{}, current voltage: {} V, next step in {:.0f}/{} s"
                 msg = msg.format(current_step, nsteps, current_target_voltage, dt_state_change, step_duration_s)
                 self.logging.info(msg)
             elif current_state == STATE_WAITING_HIGH:
+                self.hvps.set_voltage(current_target_voltage)
                 if ac_mode:
-                    msg = "Cyclic actuation: {}/{} cycles"
-                    msg = msg.format(*cycles_completed)
+                    # check how many cycles have been completed
+                    prev_cycles_completed = cycles_completed  # remember how many we've had previously
+                    cycles_completed, cycles_expected = self.hvps.get_cycle_number()
+                    # get switching mode so we can see if it switched back from 2 to 0
+                    sw_mode = self.hvps.get_switching_mode()
+
+                    if cycles_expected == 0:  # reset due to reconnect
+                        cycles_expected = ac_cycle_count - prev_cycles_completed
+                        self.hvps.set_cycle_number(cycles_expected)  # finish remaining cycles
+                        cycles_completed = 0  # should already be 0 in any case, but just to be sure
+                        self.hvps.set_frequency(ac_frequency)
+                        self.hvps.set_switching_mode(2)
+                        msg = "HVPS was reset. Restarting cycles ({} cycles remaining)".format(cycles_expected)
+                        total_cycles += prev_cycles_completed  # need to record these here or they'll be lost
+
+                    elif cycles_completed == 0 and sw_mode == 0:  # finished current set of cycles
+                        ac_finished = True
+                        msg = "Cyclic actuation finished."
+                    else:
+                        msg = "Cyclic actuation: {}/{} cycles".format(cycles_completed, cycles_expected)
                 else:
-                    msg = "Waiting high: {:.0f}/{} s"
-                    msg = msg.format(dt_state_change, duration_high_s)
+                    self.hvps.set_switching_mode(1)  # make sure it remains 1 (DC), in case it was reset
+                    msg = "Waiting high: {:.0f}/{} s".format(dt_state_change, duration_high_s)
                 self.logging.info(msg)
             else:
                 logging.critical("Unknown state in the state machine")
@@ -232,8 +257,7 @@ class NERD:
                     new_step = 0  # reset steps
             elif current_state == STATE_RAMP:
                 if dt_state_change > step_duration_s:
-                    new_step = current_step + 1
-                    new_target_voltage = round(new_step * voltage_step)
+                    new_target_voltage = -1
                     # keep increasing step-wise until we are above the min voltage
                     while new_target_voltage < min_voltage and new_step <= nsteps:
                         new_step += 1  # increase step
@@ -243,12 +267,16 @@ class NERD:
                         new_target_voltage = max_voltage
             elif current_state == STATE_WAITING_HIGH:
                 if ac_mode:
-                    finished = cycles_completed[0] == 0  # if n cycles turned back to 0, the cycles have been completed
+                    finished = ac_finished
                 else:
                     finished = dt_state_change > duration_high_s  # in DC mode, change state after time has elapsed
                 if finished:
                     new_state = STATE_WAITING_LOW
                     new_target_voltage = 0
+                    if ac_mode:
+                        total_cycles += cycles_completed
+                    else:
+                        total_cycles += 1
             else:
                 logging.critical("Unknown state in the state machine")
                 raise Exception
@@ -258,19 +286,23 @@ class NERD:
             ##############################################################
 
             # check if state will change at then end of this cycle
-            state_changing = new_state is not current_state or new_step is not current_step
+            state_changing = new_state is not current_state
+            step_changing = new_step is not current_step
             if state_changing:
-                msg = "State changeing from {} (step {}) to {} (step {})"
-                self.logging.debug(msg.format(current_state, current_step, new_state, new_step))
+                msg = "State changing from {} to {}"
+                self.logging.info(msg.format(current_state, new_state))
+            elif step_changing:
+                msg = "Ramp step changing from {} to {}"
+                self.logging.info(msg.format(current_step, new_step))
 
-            dt_measurement = now - time_last_measurement  # time since last state change
-            measurement_due = dt_measurement > measurement_period_s or state_changing or breakdown_occurred
+            interval_passed = now - time_last_measurement > measurement_period_s  # check if it's time for measurement
+            measurement_due = interval_passed or state_changing or step_changing or breakdown_occurred
             # if breakdown occurred last cycle, we also want a measurement now so we have before and after
             # self.logging.debug("Time since last measurement: {} s,  measurement due: {}".format(dt_measurement,
             #                                                                                     measurement_due))
 
-            dt_image_saved = now - time_last_image_saved  # time since last state change
-            image_due = dt_image_saved > image_capture_period_s or state_changing or breakdown_occurred
+            interval_passed = now - time_last_image_saved > image_capture_period_s  # check if it's time to store image
+            image_due = interval_passed or state_changing or breakdown_occurred
             # breakdown_occurred will be true here if the breakdown happened last cycle.
             # Thus, the next image after breakdown is also stored
             # self.logging.debug("Time since last image saved: {} s,  New image required: {}".format(dt_image_saved,
@@ -280,16 +312,21 @@ class NERD:
             # pause test if switchboard is checking for shorts, then check if a breakdown occurred
             ####################################################################
 
-            # TODO: make sure switchboard is still working correctly after a reconnect
-            dea_state_el_new = self.hvps.get_relay_state()
-            if dea_state_el_new[0] == 2:  # switchboard is testing
+            if self.hvps.is_testing():
                 self.logging.info("Switchboard is testing for short circuits. NERD test paused...")
 
                 # wait for check to be over
-                time_pause_started = time.perf_counter()
-                while dea_state_el_new[0] == 2:
-                    dea_state_el_new = self.hvps.get_relay_state()
-                    time.sleep(0.01)
+                time_pause_started = time.perf_counter()  # measure how long it took
+
+                if ac_active:
+                    self.hvps.set_switching_mode(1)  # disable AC while testing
+                    ac_paused = True
+                    # will be resumed later after we know if breakdown occurred or not
+
+                while self.hvps.is_testing():
+                    time.sleep(0.5)  # wait for test to finish
+
+                self.logging.info("Short circuit detection finished. Resuming test.")
 
                 # extend time until next state change/measurement/image by the duration of the test
                 pause_duration = time.perf_counter() - time_pause_started
@@ -298,25 +335,35 @@ class NERD:
                 time_last_image_saved += pause_duration
                 time_last_voltage_measurement += pause_duration
 
-                self.logging.info("Short circuit detection finished: {} Resuming test.".format(dea_state_el_new))
+            dea_state_el_new = self.hvps.get_relay_state()  # check DEA electrical state (can be None if invalid reply)
 
-            # check which samples broke down
-            if dea_state_el is not None:
-                failed_deas = np.nonzero(np.array(dea_state_el_new) - np.array(dea_state_el))
+            # check if samples broke down
+            if dea_state_el is not None and dea_state_el_new is not None:
+                failed_deas = np.nonzero(np.array(dea_state_el_new) - np.array(dea_state_el) == -1)
                 failed_deas = failed_deas[0]  # np.nonzero returns tuple - we only want the first value
                 breakdown_occurred = len(failed_deas) > 0
 
             if breakdown_occurred:
+                # if all relays are off and more than one DEA "failed" at once, it's probably due to a reset
+                # TODO: fix this so we don't get stuck here at the end of a test if multiple DEAs failed at one
+                if dea_state_el_new.count(0) == 6 and len(failed_deas) > 1:
+                    self.hvps.set_relay_auto_mode()  # must have been reset -> re-enable relays in auto mode
+                    continue
+
                 self.logging.info("Breakdown detected! DEAs: {}".format(failed_deas))
                 image_due = True
-            else:  # no breakdown, so we don't need the prev state anymore. If breakdown we record the prev state first
-                dea_state_el = dea_state_el_new
+            else:  # no breakdown
+                if ac_paused:
+                    self.hvps.set_switching_mode(2)  # re-enable AC after testing
+                    ac_paused = False
+
+                # we don't need the prev DEA state anymore. If breakdown we record the state first and update it later
+                if dea_state_el_new is not None:
+                    dea_state_el = dea_state_el_new
 
             ###########################################################################
             # Measurements
             ###########################################################################
-
-            ac_active = ac_mode and current_state == STATE_WAITING_HIGH
 
             # First: fast measurements that are carried out every cycle ###################
 
@@ -327,8 +374,9 @@ class NERD:
 
                 # measure leakage current
                 if self.daq is not None and not ac_active:
-                    leakage_current = self.daq.measure_current(nplc=5)  # measure total current for n power line cycles
-                    leakage_buf.append(leakage_current)  # append to buffer so we can average when we write the data
+                    leakage_current = self.daq.measure_current(nplc=3)  # measure total current for n power line cycles
+                    if leakage_current is not None:
+                        leakage_buf.append(leakage_current)  # append to buffer so we can average when we write the data
 
                 # capture images
                 self.image_cap.grab_images()  # tell each camera to grab a frame - will only be retrieved if needed
@@ -348,21 +396,27 @@ class NERD:
             if measurement_due and not breakdown_occurred:
 
                 # if in AC mode, switch to DC for the duration of the measurement
-                if ac_active and not breakdown_occurred:
-                    self.logging.debug("Suspended AC mode during measurement")
-                    self.hvps.set_switching_mode(1)  # set to DC. number of completed cycles will be remembered
-                    time_measurement_started = time.perf_counter()  # record how long AC was suspended
-
-                    time.sleep(ac_wait_before_measurement)  # wait high for a few seconds before measurement
-                else:
-                    time_measurement_started = None
+                if ac_active:
+                    if time_pause_started == -1:
+                        self.logging.debug("Suspending AC mode in preparation for measurement")
+                        self.hvps.set_switching_mode(1)  # set to DC. number of completed cycles will be remembered
+                        ac_paused = True
+                        time_pause_started = time.perf_counter()  # record how long AC was suspended
+                        continue
+                    else:
+                        time_waited = time.perf_counter() - time_pause_started
+                        if time_waited < ac_wait_before_measurement:
+                            msg = "Waiting at high voltage (DC) before taking measurement: {:.2f}/{} s "
+                            self.logging.debug(msg.format(time_waited, ac_wait_before_measurement))
+                            continue  # keep processing the first part of the loop so we keep checking for breakdown
+                        else:
+                            time_pause_started = -1  # reset wait start time
 
                 # ------------------------------
                 # Record data: resistance, leakage current
                 # ------------------------------
-                # TODO: make all measurements fail-safe so the test continues running if any instrument fails
+                # TODO: make all measurements fail-safe so the test keeps running if any instrument fails permanently
 
-                # TODO: add pasue before measurement! Important in AC, but also for current measurements generally
                 self.logging.info("Current voltage: {} V".format(measured_voltage))
                 self.logging.info("DEA state: {}".format(dea_state_el))
 
@@ -370,7 +424,10 @@ class NERD:
 
                     # measure resistance
                     Rdea = self.daq.measure_DEA_resistance(self.active_deas, n_measurements=1, nplc=1)  # 1-D np array
-                    self.logging.info("Resistance [kΩ]: {}".format(Rdea / 1000))
+                    if Rdea is not None:
+                        self.logging.info("Resistance [kΩ]: {}".format(Rdea / 1000))
+                    else:
+                        self.logging.info("Resistance measurement failed (returned None)")
 
                     # aggregate current measurements
                     if ac_active or len(leakage_buf) == 0:
@@ -384,18 +441,17 @@ class NERD:
                     self.logging.info("Leakage current [nA]: {}".format(leakage_cur_avg * 1000000000))
 
                 # --- resume cycling if in AC mode -------------------------------------
-                if ac_active:
-                    cycles_completed = self.hvps.get_cycle_number()[0]  # cycles back to 0 if completed
-                    # don't turn AC back on if all cycles completed (otherwise it'll start over)
-                    if cycles_completed > 0:
-                        self.logging.debug("Resuming AC mode")
+                if ac_paused:
+                    if not ac_finished:
                         self.hvps.set_switching_mode(2)  # set back to AC
-                    else:  # should be extremely unlikely to happen but let's make a note if it does
-                        self.logging.warning("AC mode note resumed after measurement because no more cycles remained")
+                        ac_paused = False
+                        self.logging.debug("Measurement complete. Resuming AC cycling.")
+                    else:
+                        self.logging.debug("AC cycling finished before measurement. AC cycling is not resumed.")
 
                     # measurement time was only counted half in AC mode --> add other half
                     time_measurement_ended = time.perf_counter()
-                    measurement_duration = time_measurement_ended - time_measurement_started
+                    measurement_duration = time_measurement_ended - time_pause_started
                     duration_at_max_V += measurement_duration / 2
 
             if measurement_due or breakdown_occurred:  # if breakdown, data from previous cycle is saved
@@ -430,10 +486,10 @@ class NERD:
                 # ------------------------------
                 # Save all data voltage and DEA state
                 # ------------------------------
-                # TODO: record total number of cycles in AC mode
                 saver.write_data(now_tstamp,
                                  now - time_started,
                                  duration_at_max_V,
+                                 total_cycles + cycles_completed,
                                  current_state,
                                  current_target_voltage,
                                  measured_voltage,
@@ -445,7 +501,7 @@ class NERD:
                                  leakage_cur_avg,
                                  image_saved=image_due)
 
-                time_last_measurement = now
+                time_last_measurement = time.perf_counter()
 
                 # -----------------------
                 # save images
@@ -481,23 +537,32 @@ class NERD:
             # ------------------------------
             # Apply state change and update voltage
             # ------------------------------
-            if state_changing:
+            if state_changing or step_changing:
                 # set voltage for new state
                 current_target_voltage = new_target_voltage
+                self.logging.debug("State changing. Setting voltage to {} V".format(current_target_voltage))
                 ret = self.hvps.set_voltage_no_overshoot(current_target_voltage)
                 if ret is not True:
-                    self.logging.debug("Failed to set voltage")
+                    self.logging.warning("Failed to set voltage")
 
                 if new_state == STATE_WAITING_HIGH and ac_mode:
                     self.hvps.set_cycle_number(ac_cycle_count)  # set the requested number cycles
+                    self.hvps.set_frequency(ac_frequency)
                     self.hvps.set_switching_mode(2)
+                    ac_finished = False
+                    ac_active = True
+                    ac_paused = False
+                    self.logging.debug("Started AC cyling")
                 else:
                     self.hvps.set_switching_mode(1)  # anything but high phase in AC mode requires DC
+                    ac_active = False
 
                 current_state = new_state
                 current_step = new_step
+                now = time.perf_counter()  # record time when the state actually changed
                 time_last_state_change = now
-                time_last_image_saved = time_last_state_change  # also reset image timer to avoid taking too many
+                time_last_measurement = now
+                time_last_image_saved = now  # also reset image timer to avoid taking too many
 
             # ------------------------------
             # Keep track of voltage changes
