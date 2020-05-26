@@ -173,6 +173,7 @@ class NERD:
         breakdown_occurred = False
         failed_deas = []
         cycles_completed = 0
+        cycles_expected = 0
         total_cycles = 0
         ac_finished = False  # indicates if the current set of cycles was completed
         ac_paused = False  # indicated if cycling is currently paused (for measurement or breakdown detection)
@@ -274,9 +275,9 @@ class NERD:
                     new_state = STATE_WAITING_LOW
                     new_target_voltage = 0
                     if ac_mode:
-                        total_cycles += cycles_expected
+                        cycles_completed = cycles_expected  # because cycles completed cycled back to 0
                     else:
-                        total_cycles += 1
+                        cycles_completed = 1
             else:
                 logging.critical("Unknown state in the state machine")
                 raise Exception
@@ -563,6 +564,10 @@ class NERD:
                 else:
                     self.hvps.set_switching_mode(1)  # anything but high phase in AC mode requires DC
                     ac_active = False
+
+                    if new_state == STATE_WAITING_LOW:
+                        total_cycles += cycles_completed
+                        cycles_completed = 0  # set to 0 again because it doesn't get updated anymore in DC mode
 
                 current_state = new_state
                 current_step = new_step
