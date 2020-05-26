@@ -274,7 +274,7 @@ class NERD:
                     new_state = STATE_WAITING_LOW
                     new_target_voltage = 0
                     if ac_mode:
-                        total_cycles += cycles_completed
+                        total_cycles += cycles_expected
                     else:
                         total_cycles += 1
             else:
@@ -295,14 +295,19 @@ class NERD:
                 msg = "Ramp step changing from {} to {}"
                 self.logging.info(msg.format(current_step, new_step))
 
+            # if breakdown happened last loop cycle, let's record another measurement now immediately after
+            if breakdown_occurred:  # this means breakdown happened in previous loop
+                time_last_measurement -= measurement_period_s  # makes sure that a measurement is due immediately
+                time_last_image_saved -= image_capture_period_s  # makes sure that an image is due immediately
+
             interval_passed = now - time_last_measurement > measurement_period_s  # check if it's time for measurement
-            measurement_due = interval_passed or state_changing or step_changing or breakdown_occurred
+            measurement_due = interval_passed or state_changing or step_changing
             # if breakdown occurred last cycle, we also want a measurement now so we have before and after
             # self.logging.debug("Time since last measurement: {} s,  measurement due: {}".format(dt_measurement,
             #                                                                                     measurement_due))
 
             interval_passed = now - time_last_image_saved > image_capture_period_s  # check if it's time to store image
-            image_due = interval_passed or state_changing or breakdown_occurred
+            image_due = interval_passed or state_changing
             # breakdown_occurred will be true here if the breakdown happened last cycle.
             # Thus, the next image after breakdown is also stored
             # self.logging.debug("Time since last image saved: {} s,  New image required: {}".format(dt_image_saved,
@@ -353,11 +358,12 @@ class NERD:
                 self.logging.info("Breakdown detected! DEAs: {}".format(failed_deas))
                 image_due = True
             else:  # no breakdown
-                if ac_paused:
-                    self.hvps.set_switching_mode(2)  # re-enable AC after testing
+                if ac_paused and not measurement_due:
+                    self.logging.debug("Re-enabling AC mode after pause")
+                    self.hvps.set_switching_mode(2)  # re-enable AC after testing if no breakdown occurred
                     ac_paused = False
 
-                # we don't need the prev DEA state anymore. If breakdown we record the state first and update it later
+                # we don't need the prev DEA state anymore if there was no breakdown (otherwise we need to record it)
                 if dea_state_el_new is not None:
                     dea_state_el = dea_state_el_new
 
@@ -408,6 +414,7 @@ class NERD:
                         if time_waited < ac_wait_before_measurement:
                             msg = "Waiting at high voltage (DC) before taking measurement: {:.2f}/{} s "
                             self.logging.debug(msg.format(time_waited, ac_wait_before_measurement))
+
                             continue  # keep processing the first part of the loop so we keep checking for breakdown
                         else:
                             time_pause_started = -1  # reset wait start time
