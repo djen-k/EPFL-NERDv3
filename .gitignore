@@ -6,3 +6,4 @@
 /config.txt
 *.mat
 /src/image_processing/logs/
+/src/measurement/voltage log.csv

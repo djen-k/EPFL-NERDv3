@@ -106,7 +106,7 @@ class HVPS:
 
         self.continuous_voltage_reading_flag = False
         self.buffer_lock = Lock()
-        self.voltage = np.zeros((self.buffer_length))  # voltage buffer
+        self.voltage_buf = np.zeros((self.buffer_length))  # voltage buffer
         self.times = np.zeros((self.buffer_length))  # Times buffer
         self.index_buffer = 0
         self.reading_thread = Thread()
@@ -251,6 +251,7 @@ class HVPS:
         self.serial_com_lock.release()
         # self.logging.debug("Serial port closed")
 
+    @check_connection
     def get_name(self):  # queries the name of the board
         """Queries name of the board"""
         self.logging.debug("Querying device name")
@@ -258,6 +259,7 @@ class HVPS:
         res = self._read_hvps()
         return res
 
+    @check_connection
     def get_maximum_voltage(self):  # queries the voltage rating of the board
         """Queries the voltage rating of the board"""
         self.logging.debug("Querying device maximum voltage")
@@ -265,6 +267,7 @@ class HVPS:
         res = self._cast_int(self._read_hvps())
         return res
 
+    @check_connection
     def set_voltage(self, voltage):  # sets the output voltage
         """Sets the output voltage"""
         self._write_hvps(b'SVset %d\r' % voltage)
@@ -272,6 +275,7 @@ class HVPS:
         self.logging.debug("Set voltage setpoint to {} V. Response: {} V".format(voltage, res))
         return res
 
+    @check_connection
     def get_voltage_setpoint(self):
         """Queries voltage setpoint"""
         self._write_hvps(b'QVset\r')
@@ -279,6 +283,7 @@ class HVPS:
         self.logging.debug("Querying device voltage set point. Response: %d V" % res)
         return res
 
+    @check_connection
     def get_current_voltage(self):
         """Queries voltage output"""
         self._write_hvps(b'QVnow\r')
@@ -286,6 +291,7 @@ class HVPS:
         self.logging.debug("Querying device current voltage. Response: %d V" % res)
         return res
 
+    @check_connection
     def set_pwm(self, pwm_value):  # sets the pwm value
         """Sets the PWM Value.
         Defines the functioning set point of the HV programmable source as a 10-bit (0-1023) raw \
@@ -297,6 +303,7 @@ class HVPS:
         res = self._cast_int(self._read_hvps())
         return res
 
+    @check_connection
     def get_pwm(self):  # queries the pwm setting
         """Queries the current HVPS setpoint as a raw PWM value."""
         self.logging.debug("Querying device current PWM Value")
@@ -304,6 +311,7 @@ class HVPS:
         res = self._cast_int(self._read_hvps())
         return res
 
+    @check_connection
     def set_frequency(self, frequency):  # sets the frequency
         """Sets the frequency of the signal when the HVPS is in switching mode.
         For example SF 0.5 to set the frequency to 0.5 Hz.
@@ -314,6 +322,7 @@ class HVPS:
         self.logging.debug("Set device frequency to {:.3f}. Response: {:.3f}".format(frequency, res))
         return res
 
+    @check_connection
     def get_frequency(self):  # queries the frequency
         """Queries the switching frequency. The returned value is in Hz."""
         self._write_hvps(b'QF\r')
@@ -321,6 +330,7 @@ class HVPS:
         self.logging.debug("Querying device current frequency value. Response: %.3f" % res)
         return res
 
+    @check_connection
     def set_cycle_number(self, cycle_number):
         """Sets the number of switching cycles to perform when the HVPS is in switching mode.
         The maximum value is 65535. A value of 0 means continuous switching
@@ -336,6 +346,7 @@ class HVPS:
         self.logging.debug("Set device cycle number to {}. Response: {}".format(cycle_number, res))
         return res
 
+    @check_connection
     def get_cycle_number(self):
         """Queries the number of cycles.
         The returned value is in the form XXX/YYY, with XXX being the current cycle number and YYY
@@ -357,6 +368,7 @@ class HVPS:
             self.logging.debug("Returning cycle {}/{}".format(res[0], res[1]))
         return res
 
+    @check_connection
     def set_switching_mode(self, switching_mode):
         """Sets the switching mode of the HVPS.
         Four possible values: 0 HVPS is off (0 V output irrespective of voltage setpoint),
@@ -383,6 +395,7 @@ class HVPS:
         """Start Switching Mode"""
         self.set_switching_mode(SWMODE_SW)
 
+    @check_connection
     def get_switching_mode(self):  # queries the switching mode
         """Queries the switching mode of the HVPS:
             0 box is off (0 V output irrespective of voltage setpoint),
@@ -394,6 +407,7 @@ class HVPS:
         self.logging.debug("Get Device switching mode. Result: {}".format(res))
         return res
 
+    @check_connection
     def set_switching_source(self, switching_source):
         """Sets the source of the switching signal.
         Accepted values are: 0 for onboard switching (from internal clock of the board),
@@ -407,6 +421,7 @@ class HVPS:
         res = self._cast_int(self._read_hvps())
         return res
 
+    @check_connection
     def get_switching_source(self):
         """queries the switching source"""
         self._write_hvps(b'QSwSrc\r')
@@ -414,6 +429,7 @@ class HVPS:
         self.logging.debug("Device switching source is %d" % res)
         return res
 
+    @check_connection
     def set_voltage_control_mode(self, voltage_control_mode):
         """Sets the voltage control mode (i.e. how is the value of the output voltage controlled):
             0 for internal voltage regulator (regulates the voltage to the value defined with the
@@ -427,6 +443,7 @@ class HVPS:
         self.logging.debug("Device voltage control mode set to {}. Result: {}.".format(voltage_control_mode, res))
         return res
 
+    @check_connection
     def get_voltage_control_mode(self):  # queries the switching source
         """Sets the voltage control mode (i.e. how is the value of the output voltage controlled):
             0 for internal voltage regulator (regulates the voltage to the value defined with the
@@ -440,6 +457,7 @@ class HVPS:
         self.logging.debug("Get device voltage control mode : %d." % res)
         return res
 
+    @check_connection
     def get_memory(self):
         """queries the content of the memory"""
         mem = HvpsMem()
@@ -463,6 +481,7 @@ class HVPS:
         self.logging.debug("Get device memory: %s" % raw_memory)
         return mem
 
+    @check_connection
     def save_memory(self):
         """save current HVPS paramters into the memory"""
         self._write_hvps(b'Save\r')
@@ -470,6 +489,7 @@ class HVPS:
         self.logging.debug("Saving current device status to memory. Result: %d" % res)
         return res
 
+    @check_connection
     def set_i2c_adress(self, i2c_adress):
         """sets the I2C address"""
         self._write_hvps(b"SI2C %d\r" % i2c_adress)
@@ -477,6 +497,7 @@ class HVPS:
         self.logging.debug("Set I2C adress to %d. Result: %d" % (i2c_adress, res))
         return res
 
+    @check_connection
     def get_i2c_adress(self):
         """queries the i2c address of the board"""
         self._write_hvps(b'QI2C\r')
@@ -484,6 +505,7 @@ class HVPS:
         self.logging.debug("Get Current I2C adress: %d" % res)
         return res
 
+    @check_connection
     def get_firmware_version(self):
         """queries the firmware version"""
         self._write_hvps(b'QVer\r')
@@ -494,6 +516,7 @@ class HVPS:
         self.logging.debug("Get Current Firmware version : %d" % res)
         return res
 
+    @check_connection
     def get_hvps_type(self):
         """Queries the type (master (multi-channel), slave (single channel))"""
         self._write_hvps(b'QVer\r')
@@ -504,6 +527,7 @@ class HVPS:
         self.logging.debug("Get HVPS Type: %s" % res)
         return res
 
+    @check_connection
     def set_latch_mode(self, latch_mode):
         """sets the latch mode of the push button"""
         self._write_hvps(b'SLatchMode %d\r' % latch_mode)
@@ -511,6 +535,7 @@ class HVPS:
         self.logging.debug("Set latch mode %d. Result: %d" % (latch_mode, res))
         return res
 
+    @check_connection
     def get_latch_mode(self):
         """queries the latch mode of the push button"""
         self._write_hvps(b'QLatchMode\r')
@@ -518,6 +543,7 @@ class HVPS:
         self.logging.debug("Get latch mode: %d" % res)
         return res
 
+    @check_connection
     def get_jack_status(self):
         """queries whether power Jack is plugged in."""
         self._write_hvps(b'QJack\r')
@@ -525,6 +551,7 @@ class HVPS:
         self.logging.debug("Get jack Status: %d" % res)
         return res
 
+    @check_connection
     def get_power_source(self):
         """queries whether power is supposed to come from Power Jack. (0 if in touchscreen \
         + battery configuration)"""
@@ -533,6 +560,7 @@ class HVPS:
         self.logging.debug("Get power source: %d" % res)
         return res
 
+    @check_connection
     def set_strobe_mode(self, strobe_mode):
         """sets the strobe mode"""
         self._write_hvps(b'SStMode %d\r' % strobe_mode)
@@ -540,6 +568,7 @@ class HVPS:
         self.logging.debug("Set strobe mode %d. Result: %d" % (strobe_mode, res))
         return res
 
+    @check_connection
     def get_strobe_mode(self):
         """queries the strobe mode"""
         self._write_hvps(b'QStMode\r')
@@ -547,6 +576,7 @@ class HVPS:
         self.logging.debug("Get strobe mode: %d." % res)
         return res
 
+    @check_connection
     def set_strobe_position(self, strobe_position):
         """sets the position of the strobe pulse"""
         self._write_hvps(b'SStPos %d\r' % strobe_position)
@@ -554,6 +584,7 @@ class HVPS:
         self.logging.debug("Set strobe position to %d. Result: %d" % (strobe_position, res))
         return res
 
+    @check_connection
     def get_strobe_position(self):
         """queries the the position of the strobe pulse"""
         self._write_hvps(b'QStPos\r')
@@ -561,6 +592,7 @@ class HVPS:
         self.logging.debug("Get strobe position: %d." % res)
         return res
 
+    @check_connection
     def set_strobe_duration(self, strobe_duration):
         """sets the duration of the strobe pulse"""
         self._write_hvps(b'SStDur %d\r' % strobe_duration)
@@ -568,6 +600,7 @@ class HVPS:
         self.logging.debug("Set strobe duration to %d. Result: %d" % (strobe_duration, res))
         return res
 
+    @check_connection
     def set_strobe_sweep_period(self, sweep_period):
         """sets the sweep period (im ms) when in sweep mode"""
         self._write_hvps(b'SStSw %d\r' % sweep_period)
@@ -575,6 +608,7 @@ class HVPS:
         self.logging.debug("Set strobe sweep period to %d. Result: %d" % (sweep_period, res))
         return res
 
+    @check_connection
     def get_strobe_duration(self):  #
         """queries the the duration of the strobe pulse"""
         self._write_hvps(b'QStDur\r')
@@ -587,17 +621,16 @@ class HVPS:
         try:
             self.ser.open()
         except:
-            self.logging.critical("Reconnextion attempt failed... retry in 500ms")
+            self.logging.critical("Reconnection attempt failed... retry in 500ms")
         while not self.ser.is_open:
             time.sleep(0.5)
             self.ser.close()
             try:
                 self.ser.open()
             except:
-                self.logging.critical("Reconnextion attempt failed... retry in 500ms")
+                self.logging.critical("Reconnection attempt failed... retry in 500ms")
         self.logging.critical("Reconnected! (?)")
 
-    @check_connection
     def _write_hvps(self, cmd):
         try:
             self.ser.write(cmd)
@@ -608,7 +641,6 @@ class HVPS:
             self.logging.critical("Error writing HVPS")
             self.dirty_reconnect()
 
-    @check_connection
     def _read_hvps(self):  # reads a line on the serial port and removes the end of line characters
         try:
             line = self.ser.readline()
@@ -687,7 +719,7 @@ class HVPS:
         """Routine for starting continuous position reading"""
         self.continuous_voltage_reading_flag = True  # Flag set to true
         self.index_buffer = 0  # Buffer position is 0
-        self.voltage = np.zeros(self.buffer_length)  # voltage buffer
+        self.voltage_buf = np.zeros(self.buffer_length)  # voltage buffer
         self.times = np.zeros(self.buffer_length)  # Times buffer
         self.reading_thread = Thread()  # Thread for continuous reading
         self.reading_thread.run = self._continuous_voltage_reading  # Method associated to thread
@@ -706,12 +738,12 @@ class HVPS:
             self.buffer_lock.acquire()  # Set Lock for data manipulation
             self.c_time = time.clock()  # Current time
             if self.index_buffer < self.buffer_length:  # Buffer not filled
-                self.voltage[self.index_buffer] = current_voltage  # Add position data
+                self.voltage_buf[self.index_buffer] = current_voltage  # Add position data
                 self.times[self.index_buffer] = self.c_time  # Add time data
                 self.index_buffer += 1  # Increment buffer
             else:  # Buffer filled
-                self.voltage[0:-1] = self.voltage[1:]  # Shift buffer of one position
-                self.voltage[-1] = current_voltage  # Add position data
+                self.voltage_buf[0:-1] = self.voltage_buf[1:]  # Shift buffer of one position
+                self.voltage_buf[-1] = current_voltage  # Add position data
                 self.times[0:-1] = self.times[1:]  # Shift time buffer
                 self.times[-1] = self.c_time  # Add time data
             self.buffer_lock.release()  # Release data lock
@@ -720,10 +752,10 @@ class HVPS:
         """Method for retrieving position buffer. clear_buffer=True causes the buffer to be reset"""
         self.buffer_lock.acquire()  # Get Data lock for multithreading
         if (copy or initialt):
-            voltages = self.voltage[:(self.index_buffer)].copy()  # Current stored positions
+            voltages = self.voltage_buf[:(self.index_buffer)].copy()  # Current stored positions
             times = self.times[:(self.index_buffer)].copy()  # Current stored times
         else:
-            voltages = self.voltage[:(self.index_buffer)]
+            voltages = self.voltage_buf[:(self.index_buffer)]
             times = self.times[:(self.index_buffer)]
         if initialt:
             times -= times[0]

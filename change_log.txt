@@ -19,3 +19,7 @@
 26/05/2020 - Switchboard: Fixed the set voltage wait until reached method so it waits while the switchboard is testing for shorts
 26/05/2020 - Main: Keep track of completed cycles properly and make sure all requested cycles (and not more) are completed even in case of a reset/disconnect
 26/05/2020 - Main: Change the wait high before measurement phase so it still actvely monitors the DEAs in that time
+27/05/2020 - Switchboard: Continuous reading now also records voltage set point, relay state, and switching mode (in addition to voltage and time)
+27/05/2020 - Switchboard: Data from continuous reading can be saved to separate output file
+28/05/2020 - Switchboard: Made all communications with hardware (write + read) atomic (using com port lock) to make sure we don't end up reading the wrong response when continuous reading thread is running
+28/05/2020 - Main: Added short 1s pause at SwMode 0 when switching from AC to DC. This prevents the samples from getting exposed to the voltage spike that occurs due to the drop in current draw.

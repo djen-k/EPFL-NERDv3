@@ -191,7 +191,8 @@ class NERD:
         # TODO: set switching mode in DC mode
         # TODO: enable only active channels, once this is supported by the switchboard
         self.hvps.set_relay_auto_mode()  # enable relay auto mode for automatic short detection. Opens all channels.
-        self.hvps.set_switching_mode(1)  # start in DC mode
+        hvps_log_file = "{}/{} hvps log.csv".format(dir_name, session_name)
+        self.hvps.start_voltage_reading(buffer_length=1, log_file=hvps_log_file)
 
         while self.shutdown_flag is not True:
             now = time.perf_counter()
@@ -377,7 +378,7 @@ class NERD:
             if not breakdown_occurred:  # don't record new data so we can save last data from before the breakdown
 
                 # measure voltage
-                measured_voltage = self.hvps.get_current_voltage(from_buffer_if_available=True)
+                measured_voltage = self.hvps.get_current_voltage(True)
 
                 # measure leakage current
                 if self.daq is not None and not ac_active:
@@ -406,6 +407,9 @@ class NERD:
                 if ac_active:
                     if time_pause_started == -1:
                         self.logging.debug("Suspending AC mode in preparation for measurement")
+                        # when switching from AC to DC, a voltage spike occurs due to the sudden drop in current
+                        self.hvps.set_switching_mode(0)  # turn off so DC voltage can stabilize and we don't overshoot
+                        time.sleep(1)  # wait for voltage to stabilize
                         self.hvps.set_switching_mode(1)  # set to DC. number of completed cycles will be remembered
                         ac_paused = True
                         time_pause_started = time.perf_counter()  # record how long AC was suspended
