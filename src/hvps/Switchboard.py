@@ -427,6 +427,7 @@ class SwitchBoard(HVPS):
         self.times = deque(maxlen=self.buffer_length)  # Times buffer
         self.reading_thread = Thread()  # Thread for continuous reading
         self.reading_thread.run = self._continuous_voltage_reading  # Method associated to thread
+        self.reading_thread.daemon = True  # make daemon so it terminates if main thread dies (from some error)
         self.reading_thread.start()  # Starting Thread
 
     def stop_voltage_reading(self):

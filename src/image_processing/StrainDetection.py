@@ -373,7 +373,7 @@ def find_electrode_outline(img_bw, exclude_mask=None, max_iterations=20, center=
         new_area = ellipse[1][0] * ellipse[1][1]  # pseudo area (no need to bother multiplying by pi)
 
         # create ellipse mask and apply inverse to image to create exclude mask
-        ellipse_mask = get_ellipse_mask(ellipse, img_bw.shape, 25)
+        ellipse_mask = get_ellipse_mask(ellipse, img_bw.shape, 50)
         exclude_mask = cv.bitwise_and(img_bw, cv.bitwise_not(ellipse_mask))
 
         # dilate exclude mask to overlap ellipse contour

@@ -492,7 +492,8 @@ class NERD:
                 if 0 in dea_state_vis:  # 0 means outlier, 1 means OK
                     self.logging.warning("Outlier detected")
 
-                for img, v, e in zip(res_imgs, dea_state_vis, dea_state_el):
+                dea_state_el_selection = [dea_state_el[i] for i in self.active_deas]
+                for img, v, e in zip(res_imgs, dea_state_vis, dea_state_el_selection):
                     StrainDetection.draw_state_visualization(img, v, e)
 
                 # ------------------------------
