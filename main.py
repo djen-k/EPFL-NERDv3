@@ -427,6 +427,7 @@ class NERD:
 
                 # ------------------------------
                 # Record data: resistance, leakage current
+                # (Images are captured every cycle anyway, so we just need to retrieve them for the analysis)
                 # ------------------------------
                 # TODO: make all measurements fail-safe so the test keeps running if any instrument fails permanently
 
@@ -455,9 +456,9 @@ class NERD:
 
                 # --- resume cycling if in AC mode -------------------------------------
                 if ac_paused:
+                    ac_paused = False  # pause has ended in any case
                     if not ac_finished:
                         self.hvps.set_switching_mode(2)  # set back to AC
-                        ac_paused = False
                         self.logging.debug("Measurement complete. Resuming AC cycling.")
                     else:
                         self.logging.debug("AC cycling finished before measurement. AC cycling is not resumed.")

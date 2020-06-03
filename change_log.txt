@@ -26,3 +26,4 @@
 02/06/2020 - Main: pass electrical state only for active DEAs to strain visualization method so it shows the correct state for each DEA and doesn't mix them up
 03/06/2020 - Switchboard: when increasing voltage stepwise, start increasing from previous voltage, not from 0
 03/06/2020 - Main: fixed error in calculation of time at max V
+03/06/2020 - Main: fixed bug which caused the switchobard to be set to AC mode during wait low phase (didn't really matter much but looked confusing in the graphs)
