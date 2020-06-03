@@ -341,6 +341,7 @@ class NERD:
                 time_last_measurement += pause_duration
                 time_last_image_saved += pause_duration
                 time_last_voltage_measurement += pause_duration
+                prev_V_high = False  # set to False so the time of the test is not counted as time at high Voltage
 
             dea_state_el_new = self.hvps.get_relay_state()  # check DEA electrical state (can be None if invalid reply)
 
@@ -392,7 +393,7 @@ class NERD:
                 # record time spent at high voltage
                 V_high = abs(measured_voltage - max_voltage) < 50  # 50 V margin around max voltage counts as high
                 if V_high and prev_V_high:
-                    if ac_active:
+                    if ac_active and not ac_paused:
                         duration_at_max_V += (now - time_last_voltage_measurement) / 2  # if AC, only on half the time
                     else:
                         duration_at_max_V += now - time_last_voltage_measurement
@@ -460,11 +461,6 @@ class NERD:
                         self.logging.debug("Measurement complete. Resuming AC cycling.")
                     else:
                         self.logging.debug("AC cycling finished before measurement. AC cycling is not resumed.")
-
-                    # measurement time was only counted half in AC mode --> add other half
-                    time_measurement_ended = time.perf_counter()
-                    measurement_duration = time_measurement_ended - time_pause_started
-                    duration_at_max_V += measurement_duration / 2
 
             if measurement_due or breakdown_occurred:  # if breakdown, data from previous cycle is saved
                 # ------------------------------

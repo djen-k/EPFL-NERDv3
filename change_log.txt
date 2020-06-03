@@ -24,3 +24,5 @@
 28/05/2020 - Switchboard: Made all communications with hardware (write + read) atomic (using com port lock) to make sure we don't end up reading the wrong response when continuous reading thread is running
 28/05/2020 - Main: Added short 1s pause at SwMode 0 when switching from AC to DC. This prevents the samples from getting exposed to the voltage spike that occurs due to the drop in current draw.
 02/06/2020 - Main: pass electrical state only for active DEAs to strain visualization method so it shows the correct state for each DEA and doesn't mix them up
+03/06/2020 - Switchboard: when increasing voltage stepwise, start increasing from previous voltage, not from 0
+03/06/2020 - Main: fixed error in calculation of time at max V

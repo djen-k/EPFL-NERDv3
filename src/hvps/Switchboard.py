@@ -228,11 +228,11 @@ class SwitchBoard(HVPS):
         :param voltage: The desired output voltage, in Volts.
         :return: True or False to indicate if the voltage was set correctly.
         """
-        v = self.get_current_voltage(True)
-        dv = voltage - v
+        prev_v = self.get_current_voltage(True)
+        dv = voltage - prev_v
         if dv > 100 and voltage > self.minimum_voltage:  # if increasing (and by more than a few volts), do it slowly
-            self.set_voltage(round(voltage * 0.7), block_until_reached=True)
-            self.set_voltage(round(voltage * 0.9), block_until_reached=True)
+            self.set_voltage(round(prev_v + dv * 0.7), block_until_reached=True)
+            self.set_voltage(round(prev_v + dv * 0.9), block_until_reached=True)
         return self.set_voltage(voltage, block_until_reached=True)
 
     def get_current_voltage(self, from_buffer_if_available=True):
