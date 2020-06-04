@@ -27,5 +27,7 @@
 03/06/2020 - Switchboard: when increasing voltage stepwise, start increasing from previous voltage, not from 0
 03/06/2020 - Main: fixed error in calculation of time at max V
 03/06/2020 - Main: fixed bug which caused the switchobard to be set to AC mode during wait low phase (didn't really matter much but looked confusing in the graphs)
-03/06/2020 - Main: set reduced PID gains before starting an experiment to reduce the chance of voltage spikes
-03/06/2020 - Setup Dialog: camera selection box and Adjust button are above the image now so they are less likely to disappear off the bottom edge of the screen
+04/06/2020 - Main: set reduced PID gains before starting an experiment to reduce the chance of voltage spikes
+04/06/2020 - Setup Dialog: camera selection box and Adjust button are above the image now so they are less likely to disappear off the bottom edge of the screen
+04/06/2020 - Image capture: camera detection in parallel using multi-threading
+04/06/2020 - Strain detection: strain detection in parallel using multi-processing

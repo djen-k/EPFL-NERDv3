@@ -1,4 +1,5 @@
 import logging
+from concurrent import futures
 
 import cv2 as cv
 import numpy as np
@@ -27,6 +28,9 @@ class StrainDetector:
         self.center_shift_threshold = 100  # above 100 px shift along either axis can be considered an outlier
         self.image_deviation_threshold = 0.1  # if the average deviation is more than 10%, something bad happened
 
+        self.fit_max_iterations = 20
+        self.fit_convergence_threshold = 0.00001
+
     def set_reference(self, reference_images):
         self._reference_images = None
         self._reference_ellipses = None
@@ -50,13 +54,14 @@ class StrainDetector:
         else:
             return [get_image_deviation(img, ref) for img, ref in zip(images, self._reference_images)]
 
-    def get_dea_strain(self, imgs, output_result_image=False, check_visual_state=False, title=""):
+    def get_dea_strain(self, imgs, output_result_image=False, check_visual_state=False, title="", parallel=True):
         """
         Detect strain for the given set of images.
         :param imgs: A set of images (1 image per DEA)
         :param output_result_image: if True, the function returns a visualisation of the measured strain
         :param check_visual_state: Checks if any image has deviated too much from its reference
         :param title: A title to print on the result image. Can be a list of titles, one for each result image.
+        :param parallel: Indicate if multiprocessing should be used to process images in parallel
         :return: four object containing the strain, center shift, result images, and visual_state for each of the
         n input images. 'strain' is a n-by-4 array with the following columns:
         [area strain, radial strain X, radial strain Y, average radial strain (sqrt of area strain)]
@@ -85,29 +90,32 @@ class StrainDetector:
                 outlier = np.bitwise_or(outlier, np.array(img_dev) > self.image_deviation_threshold)
 
         # initialize lists to store results
-        ellipses = [None] * n_img
+        ellipses = []
         if self._exclude_masks is None:
             self._exclude_masks = [None] * n_img
-        masks = self._exclude_masks
+        masks = []
 
         # get fit for each DEA
-        for i in range(n_img):
-            ellipse, mask = dea_fit_ellipse(imgs[i], masks[i])
-            if masks[i] is None:
-                # If there was no mask on the first run, the first run is only used to generate a mask.
-                # We then run fit ellipse again to generate the actual fit.
-                # This step is crucial to ensure that subsequent calls to dea_fit_ellipse return consistent results.
-                # The values returned without a mask differ from those with a mask.
-                # Should maybe fix this at some point but for now we'll just call fit ellipse twice.
-                self.logging.debug("ellipse fitting was run without exclusion masks. "
-                                   "This can lead to inaccurate results. "
-                                   "Running ellipse fit again with newly generated masks.")
-                ellipse, mask = dea_fit_ellipse(imgs[i], mask)
-            ellipses[i] = ellipse
-            masks[i] = mask
+        if parallel:
+            # Use executor in with statement to ensure processes are cleaned up promptly
+            with futures.ProcessPoolExecutor(max_workers=n_img) as executor:
+                # Start the load operations and mark each future with its index
+                fits_results = executor.map(self.dea_fit_ellipse, imgs, self._exclude_masks)
+                self.logging.debug("Ellipse fitting in parallel. Submitted tasks to worker processes.")
+                for res in fits_results:
+                    ellipse, mask = res
+                    ellipses.append(ellipse)
+                    masks.append(mask)
+        else:  # don't use multi-processing
+            self.logging.debug("Sequential ellipse fitting (no multi-processing)")
+            for i in range(n_img):
+                ellipse, mask = self.dea_fit_ellipse(imgs[i], self._exclude_masks[i])
+                ellipses.append(ellipse)
+                masks.append(mask)
 
+        for i in range(n_img):
             # mark as outlier if no ellipse was found
-            if ellipse is None:
+            if ellipses[i] is None:
                 outlier[i] = True
 
         # calculate strain and center shift
@@ -160,9 +168,8 @@ class StrainDetector:
 
         # update exclude masks
         for i in range(n_img):
-            if check_visual_state and outlier[i]:
-                masks[i] = None  # keeps it from saving this mask if it belongs to an outlier
-            if masks[i] is not None:
+            # keep from saving this mask if it belongs to an outlier
+            if masks[i] is not None and not outlier[i]:
                 self._exclude_masks[i] = masks[i]
 
         if isinstance(title, str):
@@ -178,6 +185,75 @@ class StrainDetector:
                         for i in range(n_img)]
 
         return strain_all, center_shift, res_imgs, visual_state
+
+    def dea_fit_ellipse(self, img, exclude_mask=None):
+        if img is None:
+            logger.warning("No binary image specified!")
+            return None, None
+
+        # binarize image
+        img_bw = get_binary_image(img, closing_radius=10)
+
+        # If no mask is specified, create one with no exclusions
+        if exclude_mask is None:
+            # If there is no mask, the algorithm is run once with a blank mask to generate a proper mask.
+            # We then run fit ellipse normally to generate the actual fit.
+            # This step is crucial to ensure that subsequent calls to dea_fit_ellipse return consistent results.
+            # The values returned without a mask differ from those with a mask.
+            # TODO: maybe fix this mask issue at some point but for now we'll just call fit ellipse twice.
+            self.logging.debug("No mask provided for ellipse fitting. Running ellipse fit once to generate mask.")
+            exclude_mask = np.zeros(img_bw.shape, dtype=np.uint8)
+            ellipse, exclude_mask = self.dea_fit_ellipse(img, exclude_mask)
+
+        # get contours
+        cont = find_contour(img_bw)
+        ellipse = None
+        new_area = np.nan
+        converged = False
+        i = 0
+        while not converged:  # continue until area change per iteration is less than 1 %
+            # exclude regions of contour
+            cont_in = exclude_contour_points(cont, exclude_mask)
+            # fit ellipse
+            if cont_in is None or len(cont_in) < 5:
+                logger.warning("Unable to fit ellipse because no outline was found.")
+                if np.any(exclude_mask > 0):  # if any exclusions were applied
+                    exclude_mask = np.zeros(img_bw.shape, dtype=np.uint8)  # reset mask and try again
+                    logger.warning("Trying again without any exclusions.")
+                    continue
+                return None, None  # if we can't fit an ellipse and there was no mask applied, we have to abort
+
+            ellipse = cv.fitEllipseDirect(cont_in)
+            # calculate area to determine convergence
+            old_area = new_area
+            new_area = ellipse[1][0] * ellipse[1][1]  # pseudo area (no need to bother multiplying by pi)
+
+            # create ellipse mask and apply inverse to image to create exclude mask
+            ellipse_mask = get_ellipse_mask(ellipse, img_bw.shape, 50)
+            exclude_mask = cv.bitwise_and(img_bw, cv.bitwise_not(ellipse_mask))
+
+            # dilate exclude mask to overlap ellipse contour
+            operation = cv.MORPH_DILATE
+            n = 61
+            kernel = cv.getStructuringElement(cv.MORPH_ELLIPSE, (n, n))
+            exclude_mask = cv.morphologyEx(exclude_mask, operation, kernel)
+
+            # count iterations to abort after a while if the result does not converge for some reason
+            i += 1
+            if i >= self.fit_max_iterations:
+                break
+
+            if old_area == 0:
+                converged = False
+            else:
+                converged = (old_area - new_area) / old_area < self.fit_convergence_threshold
+
+        if i < self.fit_max_iterations:
+            logger.debug("Electrode outline detection converged after {} iterations".format(i))
+        else:
+            logger.warning("Electrode outline detection did not converge. Aborted after {} iterations".format(i))
+
+        return ellipse, exclude_mask
 
 
 def draw_ellipse(img, ellipse, color, line_width, draw_axes=False, axis_line_width=1):
@@ -325,79 +401,16 @@ def get_ellipse_mask(ellipse, img_shape, offset=0):
     return mask
 
 
-def dea_fit_ellipse(img, mask=None, closing_radius=10, algorithm=1):
+def _dea_fit_ellipse_old(img, mask=None, closing_radius=10):
     if img is None:
         return None, None
 
     # binarize
     img_bw = get_binary_image(img, closing_radius)
 
-    if algorithm is 0:
-        mask = approximate_electrode_outline(img_bw)
-        ellipse = refine_electrode_outline(img_bw, mask)
-    else:
-        ellipse, mask = find_electrode_outline(img_bw, mask)
+    mask = approximate_electrode_outline(img_bw)
+    ellipse = refine_electrode_outline(img_bw, mask)
     return ellipse, mask
-
-
-def find_electrode_outline(img_bw, exclude_mask=None, max_iterations=20, center=None, convergence_threshold=0.000001):
-    if img_bw is None:
-        logger.warning("No binary image specified!")
-        return None, None
-
-    # If no mask is specified, create one with no exclusions
-    if exclude_mask is None:
-        exclude_mask = np.zeros(img_bw.shape, dtype=np.uint8)
-
-    # get contours
-    cont = find_contour(img_bw, center)
-    ellipse = None
-    new_area = np.nan
-    converged = False
-    i = 0
-    while not converged:  # continue until area change per iteration is less than 1 %
-        # exclude regions of contour
-        cont_in = exclude_contour_points(cont, exclude_mask)
-        # fit ellipse
-        if cont_in is None or len(cont_in) < 5:
-            logger.warning("Unable to fit ellipse because no outline was found.")
-            if np.any(exclude_mask > 0):  # if any exclusions were applied
-                exclude_mask = np.zeros(img_bw.shape, dtype=np.uint8)  # reset mask and try again
-                logger.warning("Trying again without any exclusions.")
-                continue
-            return None, None  # if we can't fit an ellipse and there was no mask applied, we have to abort
-
-        ellipse = cv.fitEllipseDirect(cont_in)
-        # calculate area to determine convergence
-        old_area = new_area
-        new_area = ellipse[1][0] * ellipse[1][1]  # pseudo area (no need to bother multiplying by pi)
-
-        # create ellipse mask and apply inverse to image to create exclude mask
-        ellipse_mask = get_ellipse_mask(ellipse, img_bw.shape, 50)
-        exclude_mask = cv.bitwise_and(img_bw, cv.bitwise_not(ellipse_mask))
-
-        # dilate exclude mask to overlap ellipse contour
-        operation = cv.MORPH_DILATE
-        n = 61
-        kernel = cv.getStructuringElement(cv.MORPH_ELLIPSE, (n, n))
-        exclude_mask = cv.morphologyEx(exclude_mask, operation, kernel)
-
-        # count iterations to abort after a while if the result does not converge for some reason
-        i += 1
-        if i >= max_iterations:
-            break
-
-        if old_area == 0:
-            converged = False
-        else:
-            converged = (old_area - new_area) / old_area < convergence_threshold
-
-    if i < max_iterations:
-        logger.debug("Electrode outline detection converged after {} iterations".format(i))
-    else:
-        logger.warning("Electrode outline detection did not converge. Aborted after {} iterations".format(i))
-
-    return ellipse, exclude_mask
 
 
 def exclude_contour_points(contour, exclude_mask):
@@ -728,42 +741,40 @@ if __name__ == '__main__':
 
     import os
     import time
-    from libs import duallog
 
-    duallog.setup("logs", minlevelConsole=logging.DEBUG, minLevelFile=logging.DEBUG)
+    logging.basicConfig(level=logging.DEBUG)
 
     test_image_folder = "C:/Users/Djen/PycharmProjects/EPFL-NERDv3/output/" \
-                        "NERD test 20200515-112322 test strain detection on this one!/DEA 2/Images/"
+                        "NERD test 20200604-202018/DEA {}/Images/"
     # test_image_folder = "../../output/Test7/"
-    files = os.listdir(test_image_folder)
 
     _strain_detector = StrainDetector((0, 90))
 
-    ref_img = None
-    for file in files:
-        fpath = os.path.join(test_image_folder, file)
-        if not os.path.isfile(fpath):
-            continue
-        _img = cv.imread(fpath)
-        if ref_img is None:
-            ref_img = _img
+    _imgs = []
+    for _i in range(6):
+        dirname = test_image_folder.format(_i + 1)
+        files = os.listdir(dirname)
+        fpath = os.path.join(dirname, files[0])
+        _imgs.append(cv.imread(fpath))
 
-        for i in range(3):
-            print("File:", file)
-            tic = time.perf_counter()
+    for _i in range(2):
+        tic = time.perf_counter()
 
-            _result_strain, _result_center_shift, \
-            _result_images, _outlier = _strain_detector.get_dea_strain([_img], True, True)
-            toc = time.perf_counter()
+        _result_strain, _result_center_shift, \
+        _result_images, _outlier = _strain_detector.get_dea_strain(_imgs,
+                                                                   output_result_image=True,
+                                                                   check_visual_state=True,
+                                                                   parallel=True)
+        toc = time.perf_counter()
 
-            print("Strain:", _result_strain)
-            print("Area strain:", _result_strain[0, 0])
-            print("Average strain:", _result_strain[0, -1])
-            print("Average approx:", np.mean(_result_strain[0, 1:-1]))
-            print("Elapsed time:", toc - tic, "s")
+        print("Strain:", _result_strain)
+        print("Area strain:", _result_strain[0, 0])
+        print("Average strain:", _result_strain[0, -1])
+        print("Average approx:", np.mean(_result_strain[0, 1:-1]))
+        print("Elapsed time:", toc - tic, "s")
 
-            cv.imshow("Image", _result_images[0])
-            cv.waitKey()
+        cv.imshow("Image", _result_images[0])
+        cv.waitKey()
 
         # print("Outlier: ", _outlier)
         #
