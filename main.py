@@ -188,7 +188,8 @@ class NERD:
         time_pause_started = -1
         duration_at_max_V = 0
 
-        # TODO: set switching mode in DC mode
+        self.hvps.set_pid_gains((0.2, 1.0, 0.005))  # make sure we're using the correct gains to avoid voltage spikes
+
         # TODO: enable only active channels, once this is supported by the switchboard
         self.hvps.set_relay_auto_mode()  # enable relay auto mode for automatic short detection. Opens all channels.
         hvps_log_file = "{}/{} hvps log.csv".format(dir_name, session_name)

@@ -1080,7 +1080,7 @@ def measure_sequence_all():
 
     # voltage #############################################
 
-    tV, V = hvps.get_voltage_buffer()  # voltage data
+    tV, V = hvps.get_data_buffer()  # voltage data
     tSW = [t - t_start for t in tSW]  # switch mode times in seconds since start
 
     # strain #############################################

@@ -211,8 +211,8 @@ class SetupDialog(QtWidgets.QDialog):
             rowLay.addWidget(btn, alignment=Qt.AlignRight)
 
             # add image and combobox to group box layout
-            grpLay.addWidget(lbl)
             grpLay.addLayout(rowLay)
+            grpLay.addWidget(lbl)
             groupBox.setLayout(grpLay)  # apply layout to group box
 
             # put group in the box layout
@@ -390,7 +390,7 @@ class SetupDialog(QtWidgets.QDialog):
 
         # list all available com ports
         ports = self._hvps.detect()
-        display_names = ["{} ({})".format(p.name.decode("ASCII"), p.port) for p in ports]
+        display_names = ["{} ({})".format(p.name, p.port) for p in ports]
         port_names = [p.port for p in ports]
         print(display_names)
         self.cbb_switchboard.addItems(display_names)

@@ -21,7 +21,10 @@ class SwitchBoard(HVPS):
         self.continuous_voltage_reading_flag = Event()
         self.reconnect_timeout = -1
         self.t_0 = None
-        self.relay_state_buffer = None
+        self.voltage_buf = None
+        self.voltage_setpoint_buf = None
+        self.switching_mode_buf = None
+        self.relay_state_buf = None
         self.log_file = None  # will be initialized if needed
         self.log_writer = None  # will be initialized if needed
         self.log_data_fields = ["Time", "Relative time [s]", "Set voltage [V]", "Measured voltage [V]", "Switch mode",
@@ -69,7 +72,7 @@ class SwitchBoard(HVPS):
 
         if self.is_open:  # get HVPS name and print success message
             name = self.get_name()
-            logging.info("connected successfully to {} on {}".format(name.decode(), self.ser.port))
+            logging.info("connected successfully to {} on {}".format(name, self.ser.port))
         else:  # you had one job: giving the correct COM port, and you failed!
             logging.critical("Unable to connect to HVPS, ensure it's connected")
             # raise Exception
@@ -125,6 +128,9 @@ class SwitchBoard(HVPS):
 
         return is_connected_wrapper
 
+    def get_name(self):
+        return super().get_name().decode("utf-8")
+
     @check_connection
     def set_relay_auto_mode(self, reset_time=0):
         """
@@ -150,8 +156,8 @@ class SwitchBoard(HVPS):
         """
         if from_buffer_if_available is True and self.reading_thread.is_alive():
             with self.buffer_lock:
-                if self.relay_state_buffer:  # check if there is anything in it
-                    rs = self.relay_state_buffer[-1]
+                if self.relay_state_buf:  # check if there is anything in it
+                    rs = self.relay_state_buf[-1]
                     self.logging.debug("Taking relay state from buffer: {}".format(rs))
                     return rs
 
@@ -266,7 +272,7 @@ class SwitchBoard(HVPS):
     def set_relays_on(self, relays=None):
         """
         Switch the requested relays on. If not specified, all relays are switched on.
-        :param relays: A list of indices specifying which relays to switch on
+        :param relays: A list of (zero-based) indices specifying which relays to switch on
         :return: The the updated relay state returned by the switchboard
         """
         if relays is None:
@@ -276,7 +282,7 @@ class SwitchBoard(HVPS):
         else:
             res = []
             for i in relays:
-                res = self.set_relay_state(i, state=1)
+                res = self.set_relay_state(i, 1)
         return res
 
     @check_connection
@@ -293,7 +299,7 @@ class SwitchBoard(HVPS):
         else:
             res = []
             for i in relays:
-                res = self.set_relay_state(i, state=0)
+                res = self.set_relay_state(i, 0)
         return res
 
     @check_connection
@@ -363,14 +369,17 @@ class SwitchBoard(HVPS):
 
     def set_pid_gains(self, gains):
         """
-        Set the PID gains of the internal voltage regulator. The new gains will be written to the EEPROM.
+        Set the PID gains of the internal voltage regulator. The new gains will be written to the EEPROM (only if new
+        gains are different from the prvious ones).
         :param gains: A list of gain values [P, I, D]
         :return: The updated PID gains [P, I, D]
         """
-        self.set_pid_gain('p', gains[0])
-        self.set_pid_gain('i', gains[1])
-        res = self.set_pid_gain('d', gains[2])
-        return res
+        pid = ['p', 'i', 'd']
+        current_gains = self.get_pid_gains()
+        for k in range(3):
+            if gains[k] != current_gains[k]:  # only update if different to avoid excessive writing to EEPROM
+                self.set_pid_gain(pid[k], gains[k])
+        return self.get_pid_gains()
 
     @check_connection
     def set_pid_gain(self, param, gain):
@@ -423,7 +432,9 @@ class SwitchBoard(HVPS):
         self.t_0 = reference_time
         self.continuous_voltage_reading_flag.clear()  # reset the flag
         self.voltage_buf = deque(maxlen=self.buffer_length)  # voltage buffer
-        self.relay_state_buffer = deque(maxlen=self.buffer_length)  # relay state buffer
+        self.voltage_setpoint_buf = deque(maxlen=self.buffer_length)  # relay state buffer
+        self.switching_mode_buf = deque(maxlen=self.buffer_length)  # relay state buffer
+        self.relay_state_buf = deque(maxlen=self.buffer_length)  # relay state buffer
         self.times = deque(maxlen=self.buffer_length)  # Times buffer
         self.reading_thread = Thread()  # Thread for continuous reading
         self.reading_thread.run = self._continuous_voltage_reading  # Method associated to thread
@@ -449,17 +460,19 @@ class SwitchBoard(HVPS):
         while not self.continuous_voltage_reading_flag.is_set() and self.is_open:
             # While Flag is not set and HVPS is connected
             # get data
+            c_time = time.perf_counter() - t_0  # Current time (since reference)
             voltage = self.get_current_voltage(False)
             voltage_setpoint = self.get_voltage_setpoint()
-            relay_state = self.get_relay_state(False)
-            c_time = time.perf_counter() - t_0  # Current time (since reference)
             switching_mode = self.get_switching_mode()
+            relay_state = self.get_relay_state(False)
             # self.logging.debug("Logger thread: Data received")
             # store data in buffer
             with self.buffer_lock:  # acquire lock for data manipulation
-                self.voltage_buf.append(voltage)
-                self.relay_state_buffer.append(relay_state)
                 self.times.append(c_time)
+                self.voltage_buf.append(voltage)
+                self.voltage_setpoint_buf.append(voltage_setpoint)
+                self.switching_mode_buf.append(switching_mode)
+                self.relay_state_buf.append(relay_state)
                 # self.logging.debug("Logger thread: Data stored in buffer (length: {})".format(len(self.voltage_buf)))
             # write data to log file
             if log_to_file:
@@ -483,26 +496,32 @@ class SwitchBoard(HVPS):
                 self.log_writer = None
                 # self.logging.debug("Switchboard log file closed")
 
-    def get_voltage_buffer(self, clear_buffer=True, initialt=None, copy=False):
+    def get_data_buffer(self, clear_buffer=True, initial_t=None, copy=False):
         """
         Retrieve the voltage buffer. By default, the buffer is cleared after reading
         :param clear_buffer: Set true to clear the buffer after it has been read. (default: True)
-        :param initialt: If not None, all time values in the buffer will be shifted so that the first value in
+        :param initial_t: If not None, all time values in the buffer will be shifted so that the first value in
         the buffer is equal to initialt.
         :param copy: Legacy argument. This has no effect since a copy is always created when reading the buffer.
-        :return: The voltage buffer (times, voltages) as two 1-D numpy arrays
+        :return: The voltage buffer (times, voltages, voltage_sps, relay_states, sw_modes) as five 1-D numpy arrays
         """
         with self.buffer_lock:  # Get Data lock for multi threading
-            voltages = np.array(self.voltage_buf)  # convert to array (creates a copy)
             times = np.array(self.times)  # convert to array (creates a copy)
+            voltages = np.array(self.voltage_buf)  # convert to array (creates a copy)
+            voltage_sps = np.array(self.voltage_setpoint_buf)  # convert to array (creates a copy)
+            relay_states = np.array(self.relay_state_buf)  # convert to array (creates a copy)
+            sw_modes = np.array(self.switching_mode_buf)  # convert to array (creates a copy)
             if clear_buffer:
                 self.times.clear()
                 self.voltage_buf.clear()
+                self.voltage_setpoint_buf.clear()
+                self.switching_mode_buf.clear()
+                self.relay_state_buf.clear()
 
-        if initialt is not None:
-            times = times - times[0] + initialt  # shift starting time to the specified initial time
+        if initial_t is not None:
+            times = times - times[0] + initial_t  # shift starting time to the specified initial time
 
-        return times, voltages  # Return time and positions
+        return times, voltages, voltage_sps, relay_states, sw_modes  # Return time and positions
 
 
 def test_slow_voltage_rise():
@@ -520,7 +539,7 @@ def test_slow_voltage_rise():
     time.sleep(1)
     sb.set_voltage_no_overshoot(0)
     sb.close()
-    times, voltages = sb.get_voltage_buffer()
+    times, voltages, voltage_sps, relay_states, sw_modes = sb.get_data_buffer()
     plt.plot(times, voltages)
     plt.xlabel("Time (s)")
     plt.ylabel("Voltage (V)")
@@ -673,6 +692,111 @@ def test_switchboard():
     # print(sb.close())
 
 
+def tune_pid():
+    sb = SwitchBoard()
+    sb.open()
+    name = sb.get_name()
+    print(name)
+    t_start = time.perf_counter()
+    sb.start_voltage_reading(reference_time=t_start, buffer_length=100000)
+    Vset = 1500
+    freq = 50
+    samples = [1, 3, 4, 5]
+    steps = 3
+    wait_period = 3
+
+    sb.set_relays_off()  # make sure all are off
+    sb.set_switching_mode(0)
+    sb.set_voltage(0)
+
+    time.sleep(0.1)
+
+    sb.set_relays_on(samples)  # switch on only the ones we want
+
+    sb.set_pid_gains((0.2, 1.0, 0.005))
+    gains = sb.get_pid_gains()
+    print("PID gains:", gains)
+
+    time.sleep(0.1)
+
+    sb.set_switching_mode(1)
+
+    # ramp ###########################
+    for i in range(1, steps):
+        v = i / steps * Vset
+        sb.set_voltage(v)
+        print(v, "V")
+        time.sleep(wait_period)
+
+    # high ##########################
+    sb.set_voltage(Vset)
+    print(Vset, "V")
+    time.sleep(wait_period)
+
+    sb.set_frequency(freq)
+    sb.set_switching_mode(2)
+    print("Cycling at", freq, "Hz")
+    time.sleep(wait_period)
+
+    sb.set_switching_mode(0)
+    sb.set_voltage(0.95 * Vset)
+    print("Stopped cycling. Switched OC off.")
+    time.sleep(1)
+
+    sb.set_switching_mode(1)
+    sb.set_voltage(Vset)
+    print("Switched DC on.")
+    time.sleep(wait_period)
+
+    sb.set_voltage(0)
+    print("Switched voltage off.")
+    time.sleep(3)
+
+    sb.set_voltage(Vset)
+    print(Vset, "V")
+    time.sleep(2 * wait_period)
+
+    sb.set_voltage(0)
+    sb.set_switching_mode(0)
+    sb.set_relays_off()
+    print("Switched everything off.")
+    time.sleep(3)
+
+    sb.close()
+
+    # plot #####################
+
+    tV, V, Vsp, rel, sw_mode = sb.get_data_buffer()
+
+    v_on = sw_mode > 0
+    v_real = V * v_on
+    vmax = np.amax(v_real)
+    ivmax = np.argmax(v_real)
+    tmax = tV[ivmax]
+    str_vmax = "   Vmax: {} V at {:.1f} s".format(vmax, tmax)
+    print(str_vmax)
+
+    fig, ax1 = plt.subplots(figsize=(18, 9))
+    ax1.plot(tV, Vsp, color="C0")
+    ax1.plot(tV, V, color="C1")
+    ax2 = ax1.twinx()
+    ax2.plot(tV, sw_mode, color="C2")
+    ax2.set_ylabel("OC on", color="C2")
+    ax2.set_yticks([0, 1, 2])
+    ax2.set_yticklabels(["Off", "DC", "AC {} Hz".format(freq)])
+    ax2.tick_params(axis='y', colors='C2')
+    plt.xlabel("Time [s]")
+    ax1.set_ylabel("Voltage [V]")
+    ax2.set_ylabel("Switching mode")
+    title = "{} PID{}, {}V, DEA{}, reduceV".format(name, str(gains), Vset, str(samples))
+    plt.title(title + str_vmax)
+    plt.savefig("test_data/pid/new/" + title + ".png")
+    plt.show()
+
+
 if __name__ == '__main__':
-    test_switchboard()
+    import matplotlib.pyplot as plt
+
+    # test_switchboard()
+    tune_pid()
     # test_slow_voltage_rise()
