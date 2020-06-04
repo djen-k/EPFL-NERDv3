@@ -1,12 +1,12 @@
 import logging
 import time
+from concurrent import futures
 from datetime import datetime
 from threading import Thread, Event, Lock
 
 import cv2 as cv
 import numpy as np
 
-from libs.duallog import duallog
 from src.image_processing import StrainDetection
 
 
@@ -269,7 +269,80 @@ class ImageCapture:
             self.logging.warning("Not a valid camera id: {}. Expected string or int!".format(cam_id))
             return None
 
-    def find_cameras(self):
+    def find_cameras(self, parallel=True):
+        self._reset()  # release all cams and empty buffers
+
+        n_expected = 13  # in case there are 2 x 6 cams + one built-in web cam or something. Shouldn't ever be more.
+
+        if parallel is True:
+            cams_found = {}
+            # Use executor in with statement to ensure threads are cleaned up promptly
+            with futures.ThreadPoolExecutor(max_workers=n_expected) as executor:
+                # Start the load operations and mark each future with its index
+                future_to_cam = {executor.submit(self._test_camera, index): index for index in range(n_expected)}
+                for future in futures.as_completed(future_to_cam):
+                    index = future_to_cam[future]
+                    try:
+                        cam = future.result()
+                    except Exception as exc:
+                        self.logging.debug('Camera {} generated an exception: {}'.format(index, exc))
+                        cam = None
+
+                    if cam is not None:  # either no camera found at this index or some error occurred
+                        self.logging.debug('Camera {} is running'.format(index))
+                        cams_found[index] = cam
+
+            cams_list = [None] * len(cams_found)
+            for index, cam in cams_found.items():
+                cams_list[index] = cam
+        else:  # don't use threading
+            cams_list = []
+            for index in range(n_expected):
+                cam = self._test_camera(index)
+                if cam is not None:
+                    cams_list.append(cam)
+
+        self._cameras = cams_list
+        self._cameras_available = self._cameras  # store list of all available cameras.
+
+        self._camera_count = len(self._cameras)
+        self._camera_names = self._get_names_from_cameras()
+
+        self.logging.info("{} cameras found".format(self._camera_count))
+
+        # discard the first few sets of images. They tend to be rubbish
+        for i in range(10):
+            time.sleep(0.1)
+            self.grab_images()  # no need to retrieve, we just want the cameras to get warmed up (adjust exposure, etc.)
+
+        # call new set callback since the first full set of images is now available
+        if self.new_set_callback is not None:
+            self.new_set_callback(self.get_images_from_buffer(), self.get_timestamps())
+
+    def _test_camera(self, index):
+        """
+        Try to open camera and retrieve an image. If successful, return the camera, otherwise None.
+        :param index: Index of the camera to try and open
+        :return: The camera, if opened successfully.
+        """
+
+        cam = Camera(index, self.desired_resolution, self._new_image_callback)
+
+        if not cam.isOpened():  # a camera with this index doesn't exist or it is in use
+            self.logging.debug("Could not open {} (index {})".format(cam.name, index))
+            return None
+
+        self.logging.debug("{} opened (index {})".format(cam.name, index))
+        success, frame = cam.read()  # check if we can read an image
+        if success:
+            return cam
+        else:
+            msg = "Unable to retrieve image from {} (index {}). Camera will be closed."
+            self.logging.warning(msg.format(cam.name, index))
+            cam.release()
+            return None
+
+    def __find_cameras(self):
         """
         Opens all available image capture devices and stores a handle to each device as well as a list of device names
         (currently just "Camera [index]"). One initial image from each camera is retrieved and stored in the buffer.
@@ -704,15 +777,16 @@ class ImageCapture:
 SharedInstance = ImageCapture()
 
 if __name__ == '__main__':
-    duallog.setup("camera test logs", minlevelConsole=logging.DEBUG, minLevelFile=logging.DEBUG)
+    # duallog.setup("camera test logs", minlevelConsole=logging.DEBUG, minLevelFile=logging.DEBUG)
+    logging.basicConfig(level=logging.DEBUG)
     logging.info("Testing image capture")
 
     cap = SharedInstance
     cap.find_cameras()
-    _avg = cap.read_average_images(10)
-    for _img in _avg:
-        cv.imshow("Image", _img)
-        cv.waitKey()
+    # _avg = cap.read_average_images(10)
+    # for _img in _avg:
+    #     cv.imshow("Image", _img)
+    #     cv.waitKey()
     # cap.select_cameras([0])
     #
     # # print("exposure:", cap.set_fixed_exposure())

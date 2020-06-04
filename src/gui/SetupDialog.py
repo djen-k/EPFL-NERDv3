@@ -71,9 +71,9 @@ class SetupDialog(QtWidgets.QDialog):
         #  Layout
         ##############################################################################
 
-        # panel for all the settings
-        formLay = QtWidgets.QFormLayout()
-        formLay.setLabelAlignment(Qt.AlignRight)
+        # panel for all instrument settings
+        form_instruments = QtWidgets.QFormLayout()
+        form_instruments.setLabelAlignment(Qt.AlignRight)
 
         # Switchboard ####################################
 
@@ -88,14 +88,14 @@ class SetupDialog(QtWidgets.QDialog):
         # label to show what switchboard we're connected to
         self.lbl_switchboard_status = QtWidgets.QLabel("no switchboard")
 
-        formLay.addRow("Switchboard:", self.cbb_switchboard)
-        formLay.addRow("Status:", self.lbl_switchboard_status)
-        formLay.addRow("", self.btn_refresh_com)
+        form_instruments.addRow("Switchboard:", self.cbb_switchboard)
+        form_instruments.addRow("Status:", self.lbl_switchboard_status)
+        form_instruments.addRow("", self.btn_refresh_com)
 
         separator = QtWidgets.QFrame()
         separator.setFrameShape(QtWidgets.QFrame.HLine)
         separator.setFrameShadow(QtWidgets.QFrame.Sunken)
-        formLay.addRow(" ", separator)
+        form_instruments.addRow(" ", separator)
 
         # Multimeter ########################################
 
@@ -114,71 +114,76 @@ class SetupDialog(QtWidgets.QDialog):
         # label to show what switchboard we're connected to
         self.lbl_daq_status = QtWidgets.QLabel("no multimeter")
 
-        formLay.addRow("Multimeter:", self.cbb_daq)
-        formLay.addRow("Status:", self.lbl_daq_status)
-        formLay.addRow("", self.btn_refresh_daq)
-        formLay.addRow("", self.btn_test_res)
+        form_instruments.addRow("Multimeter:", self.cbb_daq)
+        form_instruments.addRow("Status:", self.lbl_daq_status)
+        form_instruments.addRow("", self.btn_refresh_daq)
+        form_instruments.addRow("", self.btn_test_res)
 
         separator = QtWidgets.QFrame()
         separator.setFrameShape(QtWidgets.QFrame.HLine)
         separator.setFrameShadow(QtWidgets.QFrame.Sunken)
-        formLay.addRow(" ", separator)
-
-        # Test parameters ########################################
+        form_instruments.addRow(" ", separator)
 
         # create voltage selector
         self.num_voltage = self.create_num_selector(0, 5000, "voltage", 1000)
-        formLay.addRow("Test voltage [V]:", self.num_voltage)
+        form_instruments.addRow("Test voltage [V]:", self.num_voltage)
 
         # toggle button to apply voltage (to check strain detection results)
         self.btn_apply_voltage = QtWidgets.QPushButton("Apply voltage now!")
         self.btn_apply_voltage.setCheckable(True)
         self.btn_apply_voltage.setEnabled(False)  # only enable if connected to an HVPS
         self.btn_apply_voltage.clicked.connect(self.btnVoltageClicked)
-        formLay.addRow("", self.btn_apply_voltage)
+        form_instruments.addRow("", self.btn_apply_voltage)
 
-        # create ramp step selector
-        self.num_steps = self.create_num_selector(0, 100, "steps", 10)
-        formLay.addRow("Ramp steps:", self.num_steps)
+        # Test parameters ########################################
 
-        # create step duration selector
-        self.num_step_duration = self.create_num_selector(0, 10000, "step_duration_s", 10)
-        formLay.addRow("Step duration (s):", self.num_step_duration)
+        # panel for all test parameters
 
-        # create high duration selector
-        self.num_high_duration = self.create_num_selector(0, 100000, "high_duration_min", 60)
-        self.num_high_duration.valueChanged.connect(self.updateCycles)
-        formLay.addRow("High duration (min):", self.num_high_duration)
-
-        # create low duration selector
-        self.num_low_duration = self.create_num_selector(0, 100000, "low_duration_s", 30)
-        formLay.addRow("Low duration (s):", self.num_low_duration)
-
-        # create measurement period selector
-        self.num_measurement_period = self.create_num_selector(0, 1000, "measurement_period_s", 10)
-        formLay.addRow("Measurement interval (s):", self.num_measurement_period)
-
-        # create image save period selector
-        self.num_save_image_period = self.create_num_selector(0, 1000, "save_image_period_min", 30)
-        formLay.addRow("Save image interval (min):", self.num_save_image_period)
+        form_parameters = QtWidgets.QFormLayout()
+        form_parameters.setLabelAlignment(Qt.AlignRight)
 
         # checkbox to enable AC mode
         self.chk_ac = QtWidgets.QCheckBox("AC mode")
         self.chk_ac.clicked.connect(self.chkACClicked)
-        formLay.addRow("", self.chk_ac)
+        form_parameters.addRow("", self.chk_ac)
+
+        # create ramp step selector
+        self.num_steps = self.create_num_selector(0, 100, "steps", 10)
+        form_parameters.addRow("Ramp steps:", self.num_steps)
+
+        # create step duration selector
+        self.num_step_duration = self.create_num_selector(0, 10000, "step_duration_s", 10)
+        form_parameters.addRow("Step duration (s):", self.num_step_duration)
+
+        # create high duration selector
+        self.num_high_duration = self.create_num_selector(0, 100000, "high_duration_min", 60)
+        self.num_high_duration.valueChanged.connect(self.updateCycles)
+        form_parameters.addRow("High duration (min):", self.num_high_duration)
+
+        # create low duration selector
+        self.num_low_duration = self.create_num_selector(0, 100000, "low_duration_s", 30)
+        form_parameters.addRow("Low duration (s):", self.num_low_duration)
+
+        # create measurement period selector
+        self.num_measurement_period = self.create_num_selector(0, 1000, "measurement_period_s", 10)
+        form_parameters.addRow("Measurement interval (s):", self.num_measurement_period)
+
+        # create image save period selector
+        self.num_save_image_period = self.create_num_selector(0, 1000, "save_image_period_min", 30)
+        form_parameters.addRow("Save image interval (min):", self.num_save_image_period)
 
         # create AC frequency selector
         self.num_ac_frequency = self.create_num_selector(1, 1000, "ac_frequency_hz", 50)
         self.num_ac_frequency.valueChanged.connect(self.updateCycles)
-        formLay.addRow("Cycle frequency [Hz]:", self.num_ac_frequency)
+        form_parameters.addRow("Cycle frequency [Hz]:", self.num_ac_frequency)
 
         # create measurement period selector
         self.num_ac_wait = self.create_num_selector(0, 1000, "ac_wait_before_measurement_s", 10)
-        formLay.addRow("Pause before measurement (s):", self.num_ac_wait)
+        form_parameters.addRow("Pause before measurement (s):", self.num_ac_wait)
 
         # create number of cycles indicator
         self.lbl_cycles = QtWidgets.QLabel("")
-        formLay.addRow("", self.lbl_cycles)
+        form_parameters.addRow("", self.lbl_cycles)
 
         # create grid layout to show all the images
         gridLay = QtWidgets.QGridLayout()
@@ -190,7 +195,8 @@ class SetupDialog(QtWidgets.QDialog):
             grpLay = QtWidgets.QVBoxLayout()
             # add label to show image
             lbl = QtWidgets.QLabel()
-            lbl.setFixedSize(self._preview_img_size[0], self._preview_img_size[1])
+            # lbl.setScaledContents(True)
+            # lbl.setFixedSize(self._preview_img_size[0], self._preview_img_size[1])
             lbl.setPixmap(self._image_buffer[i])  # initialize with waiting image
             self.lbl_image.append(lbl)
 
@@ -212,7 +218,7 @@ class SetupDialog(QtWidgets.QDialog):
 
             # add image and combobox to group box layout
             grpLay.addLayout(rowLay)
-            grpLay.addWidget(lbl)
+            grpLay.addWidget(lbl, stretch=9)
             groupBox.setLayout(grpLay)  # apply layout to group box
 
             # put group in the box layout
@@ -273,7 +279,17 @@ class SetupDialog(QtWidgets.QDialog):
         topLay = QtWidgets.QHBoxLayout()
         topLay.setAlignment(Qt.AlignLeft)
         # topLay.setContentsMargins(50, 5, 50, 5)
-        topLay.addLayout(formLay)
+
+        # instrument settings panel
+        grp_instruments = QtWidgets.QGroupBox("Instruments", self)
+        grp_instruments.setLayout(form_instruments)
+        topLay.addWidget(grp_instruments)
+
+        # test parameters panel
+        grp_parameters = QtWidgets.QGroupBox("Test parameters", self)
+        grp_parameters.setLayout(form_parameters)
+        topLay.addWidget(grp_parameters)
+
         self.schematic = QtWidgets.QLabel()
         # self.pix_schematic_DC = QtGui.QPixmap("res/images/schematic.png").scaledToHeight(300, Qt.SmoothTransformation)
         self.pix_schematic_DC = QtGui.QPixmap("res/images/NERD protocol schematic DC.png")
@@ -300,7 +316,7 @@ class SetupDialog(QtWidgets.QDialog):
         mainLay.addWidget(separator)
 
         mainLay.addLayout(buttonLay)
-        mainLay.addLayout(gridLay)
+        mainLay.addLayout(gridLay, stretch=9)
 
         ##############################################################################
         #  layout done
@@ -319,6 +335,9 @@ class SetupDialog(QtWidgets.QDialog):
 
         # self.setWindowFlags(Qt.Window)
         self.show()
+
+        top_size = topLay.totalMinimumSize()
+        self._preview_img_size = Screen.get_max_size_on_screen(img_size, (2, 3), margin=(50, top_size.height() + 200))
 
         # register callback to receive an image immediately when a camera is found
         ImageCapture.SharedInstance.set_new_image_callback(self.new_image_callback)
