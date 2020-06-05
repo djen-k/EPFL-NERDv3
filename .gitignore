@@ -7,3 +7,4 @@
 *.mat
 /src/image_processing/logs/
 /src/measurement/voltage log.csv
+/src/gui/imageviewer.py
