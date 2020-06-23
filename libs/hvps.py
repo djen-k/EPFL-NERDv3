@@ -276,7 +276,7 @@ class HVPS:
         return res
 
     @check_connection
-    def get_voltage_setpoint(self):
+    def get_voltagetge_setpoint(self):
         """Queries voltage setpoint"""
         self._write_hvps(b'QVset\r')
         res = self._cast_int(self._read_hvps())

@@ -3,24 +3,80 @@ import logging
 import time
 from collections import deque
 from datetime import datetime
-from threading import Thread, Event, Lock
+from threading import Thread, Event, Lock, RLock
 
 import numpy as np
+import serial
+import serial.tools.list_ports
 
-from libs.hvps import HVPS, HvpsInfo
+LIB_VER = "2.0"  # Version of this library
+FIRM_VER = 1  # Firmware version That this library expects to run on the HVPS
+
+# Switching mode constants: off=0, on-DC=1, on-Switching=2
+SWMODE_OFF = 0
+SWMODE_DC = 1
+SWMODE_SW = 2
+
+# Error bits
+ERR_FIRM = 0b1  # Incompatibility between python library and Firmware running on HVPS
+ERR_TYPE = 0b10  # The connected Arduino is not a single channel HVPS
+ERR_COM = 0b1000  # Communication error: The Arduino is detected but cannot talk to it.
 
 
-class SwitchBoard(HVPS):
+class HvpsInfo:
+    """Structure to store the current parameters of the HVPS"""
+
+    def __init__(self):
+        self.port = ''
+        self.name = ''
+        self.firmware_version = 0
+        self.vmin = 500
+        self.vmax = 5000
+        self.swmode = 0
+        self.vset = 0
+        self.vnow = 0
+        self.oc_freq = 0
+        self.oc_mode = 0
+        self.hb_freq = 0
+        self.hb_mode = 0
+        self.cycles = 0
+        self.cycle_n = 0  # the current cycle number
+        self.relay_state = [0] * 6
+        self.pid_gains = [0, 0, 0]
+        self.err = 0
+        self.config = 0  # could perhaps be used to indicate if OCs are available?
+
+
+class Switchboard:
+    """Class for controlling a NERD Switchboard and HVPS (version 2)"""
+
+    buffer_length = 1000000
+    baudrate = 115200
 
     # TODO: always record current state and restore after reconnect!
 
     def __init__(self):
         super().__init__()
         self.logging = logging.getLogger("Switchboard")  # change logger to "Switchboard"
-        self.logging.setLevel(logging.INFO)
-        self.continuous_voltage_reading_flag = Event()
+        self.logging.setLevel(logging.INFO)  # TODO: decide globally who logs at what level
+
+        self.ser = serial.Serial()
+
+        self.hvps_available_ports = []
+        self.is_open = False
+        self.current_device = HvpsInfo()  # Current device
+
+        self.serial_com_lock = RLock()
+
         self.reconnect_timeout = -1
+
+        self.continuous_voltage_reading_flag = Event()
+
+        self.buffer_lock = Lock()
+        self.reading_thread = Thread()
+
         self.t_0 = None
+        self.time_buf = None
         self.voltage_buf = None
         self.voltage_setpoint_buf = None
         self.switching_mode_buf = None
@@ -37,10 +93,80 @@ class SwitchBoard(HVPS):
         try:
             self.set_voltage(0, block_while_testing=True)
             self.set_relays_off()
+            # TODO: switch off OCs and H-bridge
+            self.stop_voltage_reading()
+            self.reading_thread.join(1)
+            self.close()
         except Exception as ex:
             self.logging.warning("Unable to switch off HVPS and relays: {}".format(ex))
 
-        super().__del__()
+    ###########################################################################
+    # connection and setup ####################################################
+    ###########################################################################
+
+    def detect(self):
+        """Detect available HVPS"""
+        serial_ports = serial.tools.list_ports.comports()
+        self.hvps_available_ports = []
+        for ser in serial_ports:
+            if "Arduino" in ser.description:
+                info = HvpsInfo()
+                info.port = ser.device
+                try:
+                    info = self.open_hvps(info, with_continuous_reading=False)
+                    self.close()
+                except Exception as ex:
+                    self.logging.info("Unable to open COM port {}: {}".format(ser.device, ex))
+                else:
+                    if info is not None:
+                        self.logging.info("Device {} found at port {}".format(info.name, info.port))
+                        self.hvps_available_ports.append(info)
+        self.logging.info("HVPS Detection done")
+        return self.hvps_available_ports
+
+    def open_hvps(self, info: HvpsInfo, with_continuous_reading=False):
+        """Establishes connection with the HVPS."""
+        self.logging.debug("Connecting to {}".format(info.port))
+        with self.serial_com_lock:
+            try:
+                self.ser = serial.Serial(info.port, self.baudrate, timeout=1)
+                self.ser.reset_input_buffer()
+                self.ser.reset_output_buffer()
+            except Exception as ex:
+                self.logging.info("Impossible to open port {}: {}".format(info.port, ex))
+                self.current_device = None
+
+            if self.ser.is_open:
+                self.logging.debug("Reading device data")
+                self.is_open = True
+                try:
+                    info.name = self.get_name()
+                    if self.get_firmware_version() != FIRM_VER:
+                        info.err = info.err | ERR_FIRM
+
+                    info.vmax = self.get_maximum_voltage()
+                    info.oc_freq = self.get_oc_frequency()
+                    info.hb_freq = self.get_hb_frequency()
+
+                    info.vset = self.set_voltage(0)
+                    info.swmode = self.set_switching_mode(SWMODE_DC)
+                    info.cycles = self.set_cycle_number(0)
+                except ValueError:
+                    info.err = info.err | ERR_COM
+                    self.logging.critical("Unrecognized Device")
+
+                    self.current_device = info
+                    if with_continuous_reading:
+                        self.start_continuous_reading()
+
+        return self.current_device
+
+    def open_hvps_from_port(self, port, with_continuous_reading=False):
+        """Open an HVPS from a specific COM Port"""
+        info = HvpsInfo()
+        info.port = port
+        self.open_hvps(info, with_continuous_reading)
+        return info
 
     def open(self, com_port=None, with_continuous_reading=False, reconnect_timeout=-1):
         """
@@ -113,58 +239,173 @@ class SwitchBoard(HVPS):
         self.current_device = None
         self.serial_com_lock.release()
 
+    def dirty_reconnect(self):
+        self.ser.close()
+        start = time.perf_counter()
+        elapsed = 0
+        while not self.ser.is_open:
+            try:
+                self.ser.open()
+            except Exception as ex:
+                self.logging.debug("Connection error: {}".format(ex))
+                elapsed = time.perf_counter() - start
+                if self.reconnect_timeout < 0 or elapsed < self.reconnect_timeout:  # no timeout or not yet expired
+
+                    msg = "Reconnection attempt failed!"
+                    if self.reconnect_timeout == 0:
+                        msg += " Will keep trying for {} s".format(int(round(self.reconnect_timeout - elapsed)))
+                    else:
+                        msg += " Will keep trying..."
+                    self.logging.critical(msg)
+                    self.ser.close()  # close again to make sure it's properly closed before we try again
+                    time.sleep(0.5)
+                else:
+                    self.logging.critical("Unable to reconnect! Timeout expired.")
+                    self.close()
+                    return
+
+        self.logging.critical("Reconnected!")
+
+    ###########################################################################
+    # communication ###########################################################
+    ###########################################################################
+
+    @staticmethod
     def check_connection(func):
         """Decorator for checking connection and acquiring multithreading lock"""
 
         def is_connected_wrapper(*args):
             """Wrapper"""
             if args[0].is_open:
-                args[0].serial_com_lock.acquire()
-                res = func(*args)
-                args[0].serial_com_lock.release()
+                with args[0].serial_com_lock:
+                    res = func(*args)
                 return res
             else:
-                print("Not Connected")
+                return None
 
         return is_connected_wrapper
 
-    def get_name(self):
-        return super().get_name().decode("utf-8")
+    def _write_hvps(self, cmd):
+        """
+        Write a command to the HVPS via serial
+        :param cmd: The command to send (string or bytes)
+        """
+
+        # convert to bytes if command is given as a string
+        if not isinstance(cmd, bytes):
+            cmd = bytes(cmd, "ascii")
+
+        # add end of message marker (if not already present)
+        if not cmd.endswith(b'\r'):
+            cmd += b'\r'
+
+        # send message via serial
+        self.logging.debug("Writing message to HVPS: {}".format(cmd))
+        try:
+            self.ser.write(cmd)
+            while self.ser.out_waiting:
+                time.sleep(0.01)
+        except Exception as ex:
+            self.logging.critical("Error writing to HVPS: {}".format(ex))
+            self.dirty_reconnect()
+
+    def _read_hvps(self):
+        """
+        Reads a line on the serial port and converts it to a string (without newline characters at the end)
+        :return: The message received from the switchboard (as string) or None, if no line could be read
+        from the serial port. If the line contains an auxiliary message, it is written to the log and a new line
+        is retrieved until a regular message is received.
+        """
+        try:
+            line = self.ser.readline()
+            line = line[:-2]  # removes the last 2 elements of the array because it is \r\n
+            res = bytes(line)
+
+            # check if it's an error/warning message from the switchboard or the reply to the query
+            if res is not None:
+                res = res.decode("ascii")  # directly convert back to string
+
+                if res.startswith("["):  # info/warning/error
+                    # TODO: log switchboard messages properly and raise flag in case of warnings
+                    self.logging.warning("Message from Switchboard: {}".format(res))
+
+                    res = self._read_hvps()  # read another line
+                elif res.startswith("Err"):
+                    self.logging.warning("Invalid command! Returned error.")
+                    res = None
+
+        except Exception as ex:
+            self.logging.critical("Error reading from HVPS: {}".format(ex))
+            self.dirty_reconnect()
+            res = None  # connection was lost so we never got the expected return message
+
+        self.logging.debug("Response from HVPS: {}".format(res))
+        return res
 
     @check_connection
-    def set_relay_auto_mode(self, reset_time=0):
+    def send_query(self, cmd):
         """
-        Enable the automatic short circuit detection and isolation function of the switchboard
-        :param reset_time: An optional time after which to reconnect and test all relays again (including those
-        where a short circuit was detected in a previous test). Set 0 to disable.
-        :return: The response from the switchboard
+        Send a command to the HVPS and read the response.
+        :param cmd: The command to send to the HVPS (string or bytes)
+        :return: the response (as string) or None, if no response was received
         """
-        if reset_time > 0:
-            self.logging.debug("Enabling auto mode with timeout {} s".format(reset_time))
-            self._write_hvps(b'SRelAuto %d\r' % reset_time)
+        self._write_hvps(cmd)
+        return self._read_hvps()
+
+    def _cast_int(self, data):
+        try:
+            cast_int = int(data)
+        except Exception as ex:
+            self.logging.warning("Failed to parse int: {}. Error: {}".format(data, ex))
+            cast_int = -1
+        return cast_int
+
+    def _cast_float(self, data):
+        try:
+            cast_float = float(data)
+        except Exception as ex:
+            self.logging.warning("Failed to parse float: {}. Error: {}".format(data, ex))
+            cast_float = -1
+        return cast_float
+
+    def _parse_relay_state(self, str_state):
+        try:
+            str_state = str_state.replace(":", ";")  # because v1 and v2 have different formats
+            str_state = str_state.split(";")  # separate response for each relay
+            relay_mode = self._cast_int(str_state[0])  # is either the relay mode or just "Relay state" (-> -1)
+            # TODO: make use/store relay mode somehow
+            state = str_state[1].split(",")  # split individual states
+            state = [self._cast_int(r) for r in state]  # convert all to int
+        except Exception as ex:
+            self.logging.warning("Failed to parse relay state: {}. Error: {}".format(str_state, ex))
+            return None  # return None to indicate something is wrong
+
+        if len(state) == 6:  # output is only valid if there is a state for each relay
+            return state
         else:
-            self.logging.debug("Enabling auto mode")
-            self._write_hvps(b'SRelAuto\r')
-        res = self._read_hvps()
-        return res
+            return None  # return None to indicate something is wrong
 
-    @check_connection
-    def get_relay_state(self, from_buffer_if_available=True):
-        """
-        Queries the on/off state of the relais
-        :return: A list (int) containing 0 or 1 for each relay, indicating on or off
-        """
-        if from_buffer_if_available is True and self.reading_thread.is_alive():
-            with self.buffer_lock:
-                if self.relay_state_buf:  # check if there is anything in it
-                    rs = self.relay_state_buf[-1]
-                    self.logging.debug("Taking relay state from buffer: {}".format(rs))
-                    return rs
+    ###########################################################################
+    # getters and setters #####################################################
+    ###########################################################################
 
-        self.logging.debug("Querying relay state")
-        self._write_hvps(b'QRelState\r')
-        res = self._parse_relay_state(self._read_hvps())
-        return res
+    def get_maximum_voltage(self):
+        """Query the maximum voltage of the switchboard"""
+        return self._cast_int(self.send_query("QVmax"))
+
+    def set_maximum_voltage(self, vmax):
+        """
+        Set the maximum voltage of the switchboard. Will be saved to EEPROM.
+        :param vmax: The maximum voltage
+        :return: True, if the voltage was set correctly
+        """
+        self.current_device.vmax = vmax  # update internal model
+        res = self._cast_int(self.send_query("SVmax {:.0f}".format(vmax)))
+        return res == vmax
+
+    def get_voltage_setpoint(self):
+        """Query the voltage setpoint of the switchboard"""
+        return self._cast_int(self.send_query("QVset"))
 
     def set_voltage(self, voltage, block_while_testing=False, block_until_reached=False):  # sets the output voltage
         """
@@ -205,7 +446,8 @@ class SwitchBoard(HVPS):
             while self.is_testing():
                 time.sleep(0.1)
 
-        res = super().set_voltage(voltage)
+        self.current_device.vset = voltage  # update internal model
+        res = self._cast_int(self.send_query("SVset {:.0f}".format(voltage)))
 
         if not block_until_reached:  # don't wait, return immediately
             return res == voltage
@@ -255,20 +497,62 @@ class SwitchBoard(HVPS):
                     self.logging.debug("Taking voltage from buffer: {}".format(v))
                     return v
 
-        return super().get_current_voltage()  # if thread not running or nothing in buffer, take normal reading
+        # if thread not running or nothing in buffer, take normal reading
+        return self._cast_int(self.send_query("QVnow"))
 
-    @check_connection
-    def is_testing(self):
+    def get_name(self):
+        """Queries name of the board"""
+        self.logging.debug("Querying device name")
+        return self.send_query("QName")
+
+    def set_name(self, name):
         """
-        Checks if the switchboard is currently testing for a short circuit
-        :return: True, if the switchboard is currently busy testing
+        Set the name of the board
+        :param name: The new name
+        :return: True if the name was set correctly
         """
-        self._write_hvps(b'QTestingShort\r')
-        res = self._read_hvps() == b'1'
-        self.logging.debug("Query if switchbaord is testing. Response: {}".format(res))
+        self.logging.debug("Setting device name")
+        self.current_device.name = name  # update internal model
+        res = self.send_query("SName {}".format(name))
+        return res == name
+
+    def get_firmware_version(self):
+        """Queries name of the board"""
+        self.logging.debug("Querying firmware version")
+        res = self.send_query("QVer")
+        ver = self._cast_int(res)
+        if ver == -1:  # cast int failed, presumably because it's the older firmware v1
+            res = res.split(" ")  # in v1, it's a string in the form of "slave X" need to get the value of X
+            ver = self._cast_int(res[1])
+        else:  # we're on firmware v2
+            ver += 20  # define v2 firmware to be of version 2x
+        return ver
+
+    def get_pid_gains(self):
+        self.logging.debug("Querying PID gains")
+        res = self.send_query("QKp")
+        if "," in res:  # v1: always returns all three gains
+            res = res.split(",")
+        else:  # v2: need to query each gain individually
+            res = [res, self.send_query("QKi"), self.send_query("QKd")]
+        res = [self._cast_float(s) for s in res]
         return res
 
-    @check_connection
+    def set_pid_gains(self, gains):
+        """
+        Set the PID gains of the internal voltage regulator. The new gains will be written to the EEPROM (only if new
+        gains are different from the prvious ones).
+        :param gains: A list of gain values [P, I, D]
+        :return: True if the PID gains have been set correctly
+        """
+        pid = ['p', 'i', 'd']
+        current_gains = self.get_pid_gains()
+        self.current_device.pid_gains = gains
+        for k in range(3):
+            if gains[k] != current_gains[k]:  # only update if different to avoid excessive writing to EEPROM
+                self.send_query("SK{} {:.4f}".format(pid[k], gains[k]))
+        return self.get_pid_gains() == gains
+
     def set_relays_on(self, relays=None):
         """
         Switch the requested relays on. If not specified, all relays are switched on.
@@ -277,129 +561,155 @@ class SwitchBoard(HVPS):
         """
         if relays is None:
             self.logging.debug("Set all relays on")
-            self._write_hvps(b'SRelOn\r')
-            res = self._parse_relay_state(self._read_hvps())
+            self.current_device.relay_state = [1] * 6
+            res = self.send_query("SRelOn")
+            res = self._parse_relay_state(res) == self.current_device.relay_state  # check if all are on
         else:
-            res = []
-            for i in relays:
-                res = self.set_relay_state(i, 1)
+            if self.current_device.firmware_version < 20:  # v1
+                res = True
+                for i in relays:
+                    rres = self.set_relay_state(i, 1)
+                    if rres is False:  # if any one failed, the operation was not successful
+                        res = False
+            else:
+                self.logging.warning("Switching individual relays is not supported in v2. Use selective auto mode!")
+                res = False
         return res
 
-    @check_connection
     def set_relays_off(self, relays=None):
         """
         Switch the requested relays off. If not specified, all relays are switched off.
         :param relays: A list of indices specifying which relays to switch off
-        :return: The the updated relay state returned by the switchboard
+        :return: True, if the relay state was set successfully
         """
         if relays is None:
             self.logging.debug("Set all relays off")
-            self._write_hvps(b'SRelOff\r')
-            res = self._parse_relay_state(self._read_hvps())
+            self.current_device.relay_state = [0] * 6
+            res = self.send_query("SRelOff")
+            res = self._parse_relay_state(res) == self.current_device.relay_state  # check if all are off
         else:
-            res = []
-            for i in relays:
-                res = self.set_relay_state(i, 0)
+            if self.current_device.firmware_version < 20:  # v1
+                res = True
+                for i in relays:
+                    rres = self.set_relay_state(i, 0)
+                    if rres is False:  # if any one failed, the operation was not successful
+                        res = False
+            else:
+                self.logging.warning("Switching individual relays is not supported in v2. Use selective auto mode!")
+                res = False
         return res
 
-    @check_connection
     def set_relay_state(self, relay, state):
+        self.current_device.relay_state[relay] = state
         if state is 0:
             self.logging.debug("Setting relay {} off".format(relay))
-            self._write_hvps(b'SRelOff %d\r' % relay)
+            res = self.send_query("SRelOff {:d}".format(relay))
         else:  # state is 1
             self.logging.debug("Setting relay {} on".format(relay))
-            self._write_hvps(b'SRelOn %d\r' % relay)
-        res = self._parse_relay_state(self._read_hvps())
+            res = self.send_query("SRelOn {:d}".format(relay))
+        res = self._parse_relay_state(res)
+        return res[relay] == state
+
+    def get_relay_state(self, from_buffer_if_available=True):
+        """
+        Queries the on/off state of the relais
+        :return: A list (int) containing 0 or 1 for each relay, indicating on or off
+        """
+        if from_buffer_if_available is True and self.reading_thread.is_alive():
+            with self.buffer_lock:
+                if self.relay_state_buf:  # check if there is anything in it
+                    rs = self.relay_state_buf[-1]
+                    self.logging.debug("Taking relay state from buffer: {}".format(rs))
+                    return rs
+
+        self.logging.debug("Querying relay state")
+        res = self._parse_relay_state(self.send_query("QRelState"))
         return res
 
-    def _parse_relay_state(self, str_state):
-        try:
-            self.logging.debug("Parsing relay state: {}".format(str_state))
-            state = str_state[14:-1].split(b',')  # separate response for each relay
-            state = [self._cast_int(r) for r in state]  # convert all to int
-        except Exception as ex:
-            self.logging.debug("Failed to parse relay state: {}".format(ex))
-            return None  # return None to indicate something is wrong
-
-        if len(state) == 6:  # output is only valid if there is a state for each relay
-            return state
-        else:
-            return None  # return None to indicate something is wrong
-
-    def dirty_reconnect(self):
-        self.ser.close()
-        start = time.perf_counter()
-        elapsed = 0
-        while not self.ser.is_open:
-            try:
-                self.ser.open()
-            except Exception as ex:
-                self.logging.debug("Connection error: {}".format(ex))
-                elapsed = time.perf_counter() - start
-                if self.reconnect_timeout < 0 or elapsed < self.reconnect_timeout:  # no timeout or not yet expired
-
-                    msg = "Reconnection attempt failed!"
-                    if self.reconnect_timeout == 0:
-                        msg += " Will keep trying for {} s".format(int(round(self.reconnect_timeout - elapsed)))
-                    else:
-                        msg += " Will keep trying..."
-                    self.logging.critical(msg)
-                    self.ser.close()  # close again to make sure it's properly closed before we try again
-                    time.sleep(0.5)
-                else:
-                    self.logging.critical("Unable to reconnect! Timeout expired.")
-                    self.close()
-                    return
-
-        self.logging.critical("Reconnected!")
-
-    @check_connection
-    def get_pid_gains(self):
+    def set_relay_auto_mode(self, reset_time=0, relays=None):
         """
-        Query the PID gains of the internal voltage regulator.
-        :return: A list of gain values [P, I, D]
+        Enable the automatic short circuit detection and isolation function of the switchboard
+        :param reset_time: An optional time after which to reconnect and test all relays again (including those
+        where a short circuit was detected in a previous test). Set 0 to disable.
+        :param relays: List of indices (0-5) of the channels to switch on in auto mode
+        :return: True, if the relay state was set successfully
         """
-        self._write_hvps(b'QKp\r')
-        res = self._read_hvps()  # read response
-        res = res.decode("utf-8")
-        res = res.split(",")
-        res = [float(s) for s in res]
-        return res
 
-    def set_pid_gains(self, gains):
-        """
-        Set the PID gains of the internal voltage regulator. The new gains will be written to the EEPROM (only if new
-        gains are different from the prvious ones).
-        :param gains: A list of gain values [P, I, D]
-        :return: The updated PID gains [P, I, D]
-        """
-        pid = ['p', 'i', 'd']
-        current_gains = self.get_pid_gains()
-        for k in range(3):
-            if gains[k] != current_gains[k]:  # only update if different to avoid excessive writing to EEPROM
-                self.set_pid_gain(pid[k], gains[k])
-        return self.get_pid_gains()
+        rel_bin = [int(i in relays) for i in range(6)]  # get desired state (0/1) for each relay
+        # compose string of which relays to switch on
+        rel_str = ""
+        for rel in rel_bin:
+            rel_str += rel
+        self.current_device.relay_state = rel_bin  # keep state in memory
 
-    @check_connection
-    def set_pid_gain(self, param, gain):
-        """
-        Set the specified gain of the internal voltage regulator. The new gains will be written to the EEPROM.
-        :param param: The parameter to set (P, I, or D) as a single-character string (case is ignored)
-        :param gain: The value to which to set the specified gain.
-        :return: The updated PID gains [P, I, D]
-        """
-        param = str(param)
-        param = param.lower()
-        if param not in "pid" or len(param) > 1:
-            raise ValueError("Parameter must be either 'p', 'i', or 'd'!")
-        param = bytes(param, 'utf-8')
-        self._write_hvps(b'SK%b %.4f\r' % (param, gain))
-        self._read_hvps()  # read response to clear buffer
-        res = self.get_pid_gains()  # query again because the return value of the write command has too few digits
-        return res
+        self.logging.debug("Enabling auto mode with timeout {} s for channels {}".format(reset_time, rel_str))
+        res = self.send_query("SRelAuto {:.0f} {}".format(reset_time, rel_str))
+        return self._parse_relay_state(res) == rel_bin
 
-    def start_voltage_reading(self, buffer_length=None, reference_time=None, log_file=None):
+    def is_testing(self):
+        """
+        Checks if the switchboard is currently testing for a short circuit
+        :return: True, if the switchboard is currently busy testing
+        """
+        self.logging.debug("Querying if switchbaord is testing")
+        res = self.send_query("QTestingShort")
+        return res == "1"
+
+    def get_OC_frequency(self):
+        """Query the optocoupler switching frequency of the switchboard"""
+        return self._cast_int(self.send_query("QOC"))
+
+    def set_OC_witching_mode(self, oc_mode):
+        """
+        Set the optocoupler switching mode of the switchboard.
+        :param oc_mode: The OC switching mode (GND=0, HV=1, HIGHZ=3)
+        :return: True, if the mode was set correctly
+        """
+        self.current_device.oc_mode = oc_mode  # update internal model
+        res = self._cast_int(self.send_query("SOC {}".format(oc_mode)))
+        return res == oc_mode
+
+    def set_OC_frequency(self, oc_freq):
+        """
+        Set the optocoupler switching frequency of the switchboard.
+        :param oc_freq: The OC switching frequency
+        :return: True, if the frequency was set correctly
+        """
+        self.current_device.oc_freq = oc_freq  # update internal model
+        res = self._cast_int(self.send_query("SOCF {:.4f}".format(oc_freq)))
+        return res == oc_freq
+
+    def get_HB_frequency(self):
+        """Query the H-bridge switching frequency of the switchboard"""
+        return self._cast_int(self.send_query("QHB"))
+
+    def set_HB_witching_mode(self, hb_mode):
+        """
+        Set the H-bridge switching mode of the switchboard.
+        :param hb_mode: The HB switching mode (GND=0, HVA=1, HVB=2, HIGHZ=3)
+        :return: True, if the mode was set correctly
+        """
+        self.current_device.hb_mode = hb_mode  # update internal model
+        res = self._cast_int(self.send_query("SHB {}".format(hb_mode)))
+        return res == hb_mode
+
+    def set_HB_frequency(self, hb_freq):
+        """
+        Set the H-bridge switching frequency of the switchboard and start AC mode.
+        :param hb_freq: The HB switching frequency
+        :return: True, if the frequency was set correctly
+        """
+        self.current_device.hb_freq = hb_freq  # update internal model
+        res = self._cast_int(self.send_query("SHBF {:.4f}".format(hb_freq)))
+        return res == hb_freq
+
+    def get_output_enabled(self):
+        """Query if the mechanical switch to enable/disable HV output is on (1) or off (0) or unknown (-1)"""
+        return self._cast_int(self.send_query("QEnable"))
+
+    # TODO: continue with commands here
+
+    def start_continuous_reading(self, buffer_length=None, reference_time=None, log_file=None):
         """
         Start continuous voltage reading in a separate thread. The data is stored in an internal buffer and can be
         retrieved via 'get_voltage_buffer'.
@@ -435,7 +745,7 @@ class SwitchBoard(HVPS):
         self.voltage_setpoint_buf = deque(maxlen=self.buffer_length)  # relay state buffer
         self.switching_mode_buf = deque(maxlen=self.buffer_length)  # relay state buffer
         self.relay_state_buf = deque(maxlen=self.buffer_length)  # relay state buffer
-        self.times = deque(maxlen=self.buffer_length)  # Times buffer
+        self.time_buf = deque(maxlen=self.buffer_length)  # Times buffer
         self.reading_thread = Thread()  # Thread for continuous reading
         self.reading_thread.run = self._continuous_voltage_reading  # Method associated to thread
         self.reading_thread.daemon = True  # make daemon so it terminates if main thread dies (from some error)
@@ -468,7 +778,7 @@ class SwitchBoard(HVPS):
             # self.logging.debug("Logger thread: Data received")
             # store data in buffer
             with self.buffer_lock:  # acquire lock for data manipulation
-                self.times.append(c_time)
+                self.time_buf.append(c_time)
                 self.voltage_buf.append(voltage)
                 self.voltage_setpoint_buf.append(voltage_setpoint)
                 self.switching_mode_buf.append(switching_mode)
@@ -506,13 +816,13 @@ class SwitchBoard(HVPS):
         :return: The voltage buffer (times, voltages, voltage_sps, relay_states, sw_modes) as five 1-D numpy arrays
         """
         with self.buffer_lock:  # Get Data lock for multi threading
-            times = np.array(self.times)  # convert to array (creates a copy)
+            times = np.array(self.time_buf)  # convert to array (creates a copy)
             voltages = np.array(self.voltage_buf)  # convert to array (creates a copy)
             voltage_sps = np.array(self.voltage_setpoint_buf)  # convert to array (creates a copy)
             relay_states = np.array(self.relay_state_buf)  # convert to array (creates a copy)
             sw_modes = np.array(self.switching_mode_buf)  # convert to array (creates a copy)
             if clear_buffer:
-                self.times.clear()
+                self.time_buf.clear()
                 self.voltage_buf.clear()
                 self.voltage_setpoint_buf.clear()
                 self.switching_mode_buf.clear()
@@ -527,7 +837,7 @@ class SwitchBoard(HVPS):
 def test_slow_voltage_rise():
     import matplotlib.pyplot as plt
 
-    sb = SwitchBoard()
+    sb = Switchboard()
     sb.open(with_continuous_reading=True)
     sb.set_relays_on()
     v = 300
@@ -548,11 +858,11 @@ def test_slow_voltage_rise():
 
 
 def test_switchboard():
-    sb = SwitchBoard()
+    sb = Switchboard()
     sb.open()
     t_start = time.perf_counter()
     time.sleep(1)
-    sb.start_voltage_reading(reference_time=t_start, buffer_length=1, log_file="voltage log.csv")
+    sb.start_continuous_reading(reference_time=t_start, buffer_length=1, log_file="voltage log.csv")
     Vset = 450
     freq = 2
     cycles_remaining = []
@@ -693,12 +1003,12 @@ def test_switchboard():
 
 
 def tune_pid():
-    sb = SwitchBoard()
+    sb = Switchboard()
     sb.open()
     name = sb.get_name()
     print(name)
     t_start = time.perf_counter()
-    sb.start_voltage_reading(reference_time=t_start, buffer_length=100000)
+    sb.start_continuous_reading(reference_time=t_start, buffer_length=100000)
     Vset = 1500
     freq = 50
     samples = [1, 3, 4, 5]

@@ -13,7 +13,7 @@ from src.fileio.DataSaver import DataSaver
 from src.fileio.ImageSaver import ImageSaver
 from src.fileio.config import read_config, write_config
 from src.gui import SetupDialog, Screen
-from src.hvps.Switchboard import SwitchBoard
+from src.hvps.Switchboard import Switchboardv2
 from src.image_processing import ImageCapture, StrainDetection
 from src.measurement.keithley import DAQ6510
 
@@ -63,7 +63,7 @@ class NERD:
 
         # connect to HVPS
         try:
-            self.hvps = SwitchBoard()
+            self.hvps = Switchboardv2()
             self.hvps.open(self.config["com_port"])
         except Exception as ex:
             self.logging.error("Unable to connect to HVPS: {}".format(ex))
@@ -193,7 +193,7 @@ class NERD:
         # TODO: enable only active channels, once this is supported by the switchboard
         self.hvps.set_relay_auto_mode()  # enable relay auto mode for automatic short detection. Opens all channels.
         hvps_log_file = "{}/{} hvps log.csv".format(dir_name, session_name)
-        self.hvps.start_voltage_reading(buffer_length=1, log_file=hvps_log_file)
+        self.hvps.start_continuous_reading(buffer_length=1, log_file=hvps_log_file)
 
         while self.shutdown_flag is not True:
             now = time.perf_counter()

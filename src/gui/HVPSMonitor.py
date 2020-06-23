@@ -5,13 +5,13 @@ import matplotlib.pyplot as plt
 import numpy as np
 from PyQt5 import QtSerialPort
 
-from src.hvps.Switchboard import SwitchBoard
+from src.hvps.Switchboard import Switchboardv2
 
 if __name__ == '__main__':
     comports = QtSerialPort.QSerialPortInfo().availablePorts()
     portnames = [info.portName() for info in comports]
     port = portnames[0]
-    hvps = SwitchBoard()
+    hvps = Switchboardv2()
     hvps.open(port)
 
     Vset = 1000
