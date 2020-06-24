@@ -10,41 +10,7 @@ import serial
 import serial.tools.list_ports
 
 LIB_VER = "2.0"  # Version of this library
-FIRM_VER = 1  # Firmware version That this library expects to run on the HVPS
-
-# Switching mode constants: off=0, on-DC=1, on-Switching=2
-SWMODE_OFF = 0
-SWMODE_DC = 1
-SWMODE_SW = 2
-
-# Error bits
-ERR_FIRM = 0b1  # Incompatibility between python library and Firmware running on HVPS
-ERR_TYPE = 0b10  # The connected Arduino is not a single channel HVPS
-ERR_COM = 0b1000  # Communication error: The Arduino is detected but cannot talk to it.
-
-
-class HvpsInfo:
-    """Structure to store the current parameters of the HVPS"""
-
-    def __init__(self):
-        self.port = ''
-        self.name = ''
-        self.firmware_version = 0
-        self.vmin = 500
-        self.vmax = 5000
-        self.swmode = 0
-        self.vset = 0
-        self.vnow = 0
-        self.oc_freq = 0
-        self.oc_mode = 0
-        self.hb_freq = 0
-        self.hb_mode = 0
-        self.cycles = 0
-        self.cycle_n = 0  # the current cycle number
-        self.relay_state = [0] * 6
-        self.pid_gains = [0, 0, 0]
-        self.err = 0
-        self.config = 0  # could perhaps be used to indicate if OCs are available?
+FIRM_VER = 20  # Firmware version That this library expects to run on the HVPS
 
 
 class Switchboard:
@@ -53,25 +19,45 @@ class Switchboard:
     buffer_length = 1000000
     baudrate = 115200
 
+    # Switching mode constants: off-GND=0, on-DC=1, on-inverse polarity=2, off-high Z=3
+    MODE_OFF = 0
+    MODE_DC = 1
+    MODE_AC = 4
+    MODE_INVERSE = 2  # only applies to H-bridge
+    MODE_HIGHZ = 3
+
     # TODO: always record current state and restore after reconnect!
 
-    def __init__(self):
+    def __init__(self, port=None):
         super().__init__()
         self.logging = logging.getLogger("Switchboard")  # change logger to "Switchboard"
         self.logging.setLevel(logging.INFO)  # TODO: decide globally who logs at what level
 
+        self.port = port
+        self.name = ''
+        self.firmware_version = 0
+        self.minimum_voltage = 500
+        self.maximum_voltage = 4800
+        self.vset = 0
+        self.vnow = 0
+        self.oc_freq = 0
+        self.oc_mode = 0
+        self.hb_freq = 0
+        self.hb_mode = 0
+        self.oc_cycles = 0  # number of completed cycles of the optocouplers
+        self.t_oc_cycle_counter = 0  # last time the oc cycle count was queried (to calculate no. of cycles since then)
+        self.hb_cycles = 0  # number of completed cycles of the H-bridge
+        self.t_hb_cycle_counter = 0  # last time the hb cycle count was queried (to calculate no. of cycles since then)
+        self.relay_state = [0] * 6
+        self.pid_gains = [0, 0, 0]
+
         self.ser = serial.Serial()
-
-        self.hvps_available_ports = []
         self.is_open = False
-        self.current_device = HvpsInfo()  # Current device
-
         self.serial_com_lock = RLock()
 
         self.reconnect_timeout = -1
 
         self.continuous_voltage_reading_flag = Event()
-
         self.buffer_lock = Lock()
         self.reading_thread = Thread()
 
@@ -79,21 +65,22 @@ class Switchboard:
         self.time_buf = None
         self.voltage_buf = None
         self.voltage_setpoint_buf = None
-        self.switching_mode_buf = None
+        self.oc_state_buf = None
+        self.hb_state_buf = None
         self.relay_state_buf = None
         self.log_file = None  # will be initialized if needed
         self.log_writer = None  # will be initialized if needed
-        self.log_data_fields = ["Time", "Relative time [s]", "Set voltage [V]", "Measured voltage [V]", "Switch mode",
+        self.log_data_fields = ["Time", "Relative time [s]", "Set voltage [V]", "Measured voltage [V]",
+                                "OC mode", "OC state", "HB mode", "HB state",
                                 "Relay 1", "Relay 2", "Relay 3", "Relay 4", "Relay 5", "Relay 6"]
         self.log_lock = Lock()
-        self.minimum_voltage = 300  # could add option to query the switchboard but we'll stick with this for now
-        self.maximum_voltage = 5000  # we'll query the actual switchboard for max voltage later
 
     def __del__(self):
         try:
+            self.set_OC_mode(0)
+            self.set_HB_mode(0)
             self.set_voltage(0, block_while_testing=True)
             self.set_relays_off()
-            # TODO: switch off OCs and H-bridge
             self.stop_voltage_reading()
             self.reading_thread.join(1)
             self.close()
@@ -104,76 +91,64 @@ class Switchboard:
     # connection and setup ####################################################
     ###########################################################################
 
-    def detect(self):
+    @staticmethod
+    def detect(n=0):
         """Detect available HVPS"""
+        logger = logging.getLogger("Switchboard")  # change logger to "Switchboard"
+
         serial_ports = serial.tools.list_ports.comports()
-        self.hvps_available_ports = []
+        available_switchboards = []
         for ser in serial_ports:
             if "Arduino" in ser.description:
-                info = HvpsInfo()
-                info.port = ser.device
-                try:
-                    info = self.open_hvps(info, with_continuous_reading=False)
-                    self.close()
-                except Exception as ex:
-                    self.logging.info("Unable to open COM port {}: {}".format(ser.device, ex))
-                else:
-                    if info is not None:
-                        self.logging.info("Device {} found at port {}".format(info.name, info.port))
-                        self.hvps_available_ports.append(info)
-        self.logging.info("HVPS Detection done")
-        return self.hvps_available_ports
+                sb = Switchboard(ser.device)
+                try:  # see if we can open it
+                    sb.open(with_continuous_reading=False)
+                    sb.close()
+                    logger.info("Device {} found at port {}".format(sb.name, sb.port))
+                    available_switchboards.append(sb)
 
-    def open_hvps(self, info: HvpsInfo, with_continuous_reading=False):
-        """Establishes connection with the HVPS."""
-        self.logging.debug("Connecting to {}".format(info.port))
+                    if 0 < n == len(available_switchboards):
+                        break  # already found the desired number of available devices
+                except Exception as ex:
+                    logger.debug("Unable to connect to device on port {}. Exception: {}".format(sb.port, ex))
+
+        logger.info("Switchboard detection done. Found {} devices.".format(len(available_switchboards)))
+        return available_switchboards
+
+    def _open_connection(self):
+        """
+        Establishes connection with the HVPS. An exception is raised it the connection could not be established.
+        """
+        self.logging.debug("Connecting to {}".format(self.port))
         with self.serial_com_lock:
             try:
-                self.ser = serial.Serial(info.port, self.baudrate, timeout=1)
+                self.ser = serial.Serial(self.port, self.baudrate, timeout=1)
                 self.ser.reset_input_buffer()
                 self.ser.reset_output_buffer()
             except Exception as ex:
-                self.logging.info("Impossible to open port {}: {}".format(info.port, ex))
-                self.current_device = None
+                self.logging.info("Impossible to open port {}: {}".format(self.port, ex))
+                raise Exception("Unable to connect to port {}!".format(self.port))
 
             if self.ser.is_open:
                 self.logging.debug("Reading device data")
                 self.is_open = True
-                try:
-                    info.name = self.get_name()
-                    if self.get_firmware_version() != FIRM_VER:
-                        info.err = info.err | ERR_FIRM
 
-                    info.vmax = self.get_maximum_voltage()
-                    info.oc_freq = self.get_oc_frequency()
-                    info.hb_freq = self.get_hb_frequency()
+                self.name = self.get_name()
+                self.firmware_version = self.get_firmware_version()
+                self.maximum_voltage = self.get_maximum_voltage()
 
-                    info.vset = self.set_voltage(0)
-                    info.swmode = self.set_switching_mode(SWMODE_DC)
-                    info.cycles = self.set_cycle_number(0)
-                except ValueError:
-                    info.err = info.err | ERR_COM
-                    self.logging.critical("Unrecognized Device")
+                # reset switchboard to make sure we're in a known state
+                self.set_voltage(0)
+                self.set_OC_mode(Switchboard.MODE_OFF)
+                self.set_HB_mode(Switchboard.MODE_OFF)
+                self.set_relays_off()
 
-                    self.current_device = info
-                    if with_continuous_reading:
-                        self.start_continuous_reading()
-
-        return self.current_device
-
-    def open_hvps_from_port(self, port, with_continuous_reading=False):
-        """Open an HVPS from a specific COM Port"""
-        info = HvpsInfo()
-        info.port = port
-        self.open_hvps(info, with_continuous_reading)
-        return info
-
-    def open(self, com_port=None, with_continuous_reading=False, reconnect_timeout=-1):
+    def open(self, port=None, with_continuous_reading=False, reconnect_timeout=-1):
         """
         Open a connection to a physical switchboard at the given COM port. The port can be specified as a string
         (COM port name), a HvpsInvo object or an index. If specified as an index, the respective port in this
         SwitchBoard's hvps_available_ports list is used. If no port is specified, the first available port is used.
-        :param com_port: The COM port to connect to. Can be a string, HvpsInfo, int or None
+        :param port: The COM port to connect to. Can be a string, HvpsInfo, int or None
         :param with_continuous_reading: Specify if the SwitchBoard should launch a thread to record continuous voltage
         readings
         :param reconnect_timeout: Optional timeout parameter to specify for how long the HVPS should attempt
@@ -184,47 +159,34 @@ class Switchboard:
         if self.is_open:
             self.close()
 
+        # figure out which port to connect to
+
+        if port is not None:
+            self.port = port
+
+        if self.port is None:  # if not defined, autodetect HVPS
+            sb = Switchboard.detect(1)[0]  # get the first switchboard we can find
+            self.open(sb.port, with_continuous_reading)
+        elif isinstance(self.port, int):  # specified as index  -> pick from list of available ports
+            sbs = Switchboard.detect()  # get the first switchboard we can find
+            if len(sbs) > self.port:
+                self.port = sbs[port].port
+            else:
+                raise ValueError("Invalid switchboard index: {}! This device does not exist!".format(self.port))
+        elif not isinstance(self.port, str):
+            raise ValueError("Invalid argument! COM port must be given as a string or index!")
+
         # connect to HVPS
-        if com_port is None:  # if not defined, autodetect HVPS
-            self.auto_open(with_continuous_reading)
-        elif isinstance(com_port, HvpsInfo):  # specified as HvpsInfo  -> open
-            self.open_hvps(com_port, with_continuous_reading)
-        elif isinstance(com_port, str):  # specified as port name (string)  -> open by name
-            self.open_hvps_from_port(com_port, with_continuous_reading)
-        elif isinstance(com_port, int):  # specified as index  -> pick from list of available ports
-            self.open_hvps(self.hvps_available_ports[com_port], with_continuous_reading)
-        else:
-            raise ValueError("Invalid argument! COM port must be given as string, index, or HvpsInfo object!")
-
-        if self.is_open:  # get HVPS name and print success message
-            name = self.get_name()
-            logging.info("connected successfully to {} on {}".format(name, self.ser.port))
-        else:  # you had one job: giving the correct COM port, and you failed!
-            logging.critical("Unable to connect to HVPS, ensure it's connected")
-            # raise Exception
-            return
-
-        # ensure we have a compatible HVPS, correctly connected and configured
-        hvps_type = (self.get_hvps_type() == "slave")  # until when is the term "slave" politically correct ?
-        jack = (self.get_jack_status() == 1)  # external power connector, not your friend Jack
-        control_mode = (self.get_voltage_control_mode() == 0)
-        if not (hvps_type and jack and control_mode):
-            logging.critical("either type, power source or control mode is not correctly set, ...")
-            # raise Exception
+        self._open_connection()  # will throw an exception if not successful (we just pass it on)
 
         # ensure firmware version is compatible
-        version = self.get_firmware_version()
-        if version != 1:
-            logging.critical("HVPS firmware version is: {}. Only tested with version 7".format(version))
+        if self.firmware_version < 20:
+            logging.critical("{} is running v1 firmware. This software requires a v2 switchboard!".format(self.name))
 
-        # set everything OFF
-        self.set_switching_source(0)  # on-board switching
-        self.set_switching_mode(0)  # OFF
-        self.set_voltage(0)
-        self.set_relays_off()
-
-        self.maximum_voltage = self.get_maximum_voltage()  # we'll store this here since it's not likely to change
         self.reconnect_timeout = reconnect_timeout
+
+        if with_continuous_reading:
+            self.start_continuous_reading()
 
     def close(self):
         """Closes connection with the HVPS"""
@@ -236,16 +198,34 @@ class Switchboard:
             self.set_relays_off()
             self.ser.close()
         self.is_open = False
-        self.current_device = None
         self.serial_com_lock.release()
 
     def dirty_reconnect(self):
+
+        # update the number of cycles if we're in AC mode (this doesn't use serial communication)
+        self.get_OC_cycles()
+        self.get_HB_cycles()
+
         self.ser.close()
         start = time.perf_counter()
-        elapsed = 0
         while not self.ser.is_open:
             try:
                 self.ser.open()
+
+                # resume operation by restoring the previous state
+                self.set_voltage(self.vset)
+                self.set_relay_auto_mode(0, self.relay_state)
+                if self.get_HB_mode() != self.hb_mode:  # they don't match so must have been a reset
+                    if self.hb_mode == Switchboard.MODE_AC:  # need to restart AC mode
+                        self.set_HB_frequency(self.hb_freq)  # should resume counting cycles correctly
+                    else:
+                        self.set_HB_mode(self.hb_mode)
+                if self.get_OC_mode() != self.oc_mode:  # they don't match so must have been a reset
+                    if self.oc_mode == Switchboard.MODE_AC:  # need to restart AC mode
+                        self.set_OC_frequency(self.oc_freq)  # should resume counting cycles correctly
+                    else:
+                        self.set_OC_mode(self.oc_mode)
+
             except Exception as ex:
                 self.logging.debug("Connection error: {}".format(ex))
                 elapsed = time.perf_counter() - start
@@ -373,7 +353,7 @@ class Switchboard:
             str_state = str_state.replace(":", ";")  # because v1 and v2 have different formats
             str_state = str_state.split(";")  # separate response for each relay
             relay_mode = self._cast_int(str_state[0])  # is either the relay mode or just "Relay state" (-> -1)
-            # TODO: make use/store relay mode somehow
+            # TODO: use/store relay mode somehow
             state = str_state[1].split(",")  # split individual states
             state = [self._cast_int(r) for r in state]  # convert all to int
         except Exception as ex:
@@ -399,7 +379,7 @@ class Switchboard:
         :param vmax: The maximum voltage
         :return: True, if the voltage was set correctly
         """
-        self.current_device.vmax = vmax  # update internal model
+        self.maximum_voltage = vmax  # update internal model
         res = self._cast_int(self.send_query("SVmax {:.0f}".format(vmax)))
         return res == vmax
 
@@ -446,7 +426,7 @@ class Switchboard:
             while self.is_testing():
                 time.sleep(0.1)
 
-        self.current_device.vset = voltage  # update internal model
+        self.vset = voltage  # update internal model
         res = self._cast_int(self.send_query("SVset {:.0f}".format(voltage)))
 
         if not block_until_reached:  # don't wait, return immediately
@@ -500,6 +480,20 @@ class Switchboard:
         # if thread not running or nothing in buffer, take normal reading
         return self._cast_int(self.send_query("QVnow"))
 
+    def set_output_on(self):
+        """Enable high voltage output by switching on the OCs and H-bridge in DC mode"""
+        self.set_HB_mode(Switchboard.MODE_DC)
+        self.set_OC_mode(Switchboard.MODE_DC)
+        if not self.is_output_enabled():
+            self.logging.warning("HV output is currently disabled. Set the output switch to ON to activate HV output!")
+
+    def set_output_off(self):
+        """Disable high voltage output by switching the OCs and H-bridge off"""
+        self.set_HB_mode(Switchboard.MODE_OFF)
+        self.set_OC_mode(Switchboard.MODE_OFF)
+        if not self.is_output_enabled():
+            self.logging.warning("HV output is currently disabled. Set the output switch to ON to activate HV output!")
+
     def get_name(self):
         """Queries name of the board"""
         self.logging.debug("Querying device name")
@@ -512,7 +506,7 @@ class Switchboard:
         :return: True if the name was set correctly
         """
         self.logging.debug("Setting device name")
-        self.current_device.name = name  # update internal model
+        self.name = name  # update internal model
         res = self.send_query("SName {}".format(name))
         return res == name
 
@@ -547,7 +541,7 @@ class Switchboard:
         """
         pid = ['p', 'i', 'd']
         current_gains = self.get_pid_gains()
-        self.current_device.pid_gains = gains
+        self.pid_gains = gains
         for k in range(3):
             if gains[k] != current_gains[k]:  # only update if different to avoid excessive writing to EEPROM
                 self.send_query("SK{} {:.4f}".format(pid[k], gains[k]))
@@ -561,11 +555,11 @@ class Switchboard:
         """
         if relays is None:
             self.logging.debug("Set all relays on")
-            self.current_device.relay_state = [1] * 6
+            self.relay_state = [1] * 6
             res = self.send_query("SRelOn")
-            res = self._parse_relay_state(res) == self.current_device.relay_state  # check if all are on
+            res = self._parse_relay_state(res) == self.relay_state  # check if all are on
         else:
-            if self.current_device.firmware_version < 20:  # v1
+            if self.firmware_version < 20:  # v1
                 res = True
                 for i in relays:
                     rres = self.set_relay_state(i, 1)
@@ -584,11 +578,11 @@ class Switchboard:
         """
         if relays is None:
             self.logging.debug("Set all relays off")
-            self.current_device.relay_state = [0] * 6
+            self.relay_state = [0] * 6
             res = self.send_query("SRelOff")
-            res = self._parse_relay_state(res) == self.current_device.relay_state  # check if all are off
+            res = self._parse_relay_state(res) == self.relay_state  # check if all are off
         else:
-            if self.current_device.firmware_version < 20:  # v1
+            if self.firmware_version < 20:  # v1
                 res = True
                 for i in relays:
                     rres = self.set_relay_state(i, 0)
@@ -600,7 +594,7 @@ class Switchboard:
         return res
 
     def set_relay_state(self, relay, state):
-        self.current_device.relay_state[relay] = state
+        self.relay_state[relay] = state
         if state is 0:
             self.logging.debug("Setting relay {} off".format(relay))
             res = self.send_query("SRelOff {:d}".format(relay))
@@ -640,7 +634,7 @@ class Switchboard:
         rel_str = ""
         for rel in rel_bin:
             rel_str += rel
-        self.current_device.relay_state = rel_bin  # keep state in memory
+        self.relay_state = rel_bin  # keep state in memory
 
         self.logging.debug("Enabling auto mode with timeout {} s for channels {}".format(reset_time, rel_str))
         res = self.send_query("SRelAuto {:.0f} {}".format(reset_time, rel_str))
@@ -655,59 +649,178 @@ class Switchboard:
         res = self.send_query("QTestingShort")
         return res == "1"
 
-    def get_OC_frequency(self):
-        """Query the optocoupler switching frequency of the switchboard"""
-        return self._cast_int(self.send_query("QOC"))
+    def get_OC_state(self, from_buffer_if_available=True):
+        """Query the optocoupler state of the switchboard"""
 
-    def set_OC_witching_mode(self, oc_mode):
+        if from_buffer_if_available is True and self.reading_thread.is_alive():
+            with self.buffer_lock:
+                if self.oc_state_buf:  # check if there is anything in it
+                    state = self.oc_state_buf[-1]
+                    self.logging.debug("Taking OC state from buffer: {}".format(state))
+                    return state
+
+        self.logging.debug("Querying OC state")
+        res = self.send_query("QOC")
+        res = res.split(",")
+        if len(res) == 2:
+            mode = self._cast_int(res[0])
+            state = self._cast_int(res[1])
+            if mode == 1:  # AC mode
+                mode = Switchboard.MODE_AC
+            else:
+                mode = state  # if in manual (not AC) mode, the current state must reflect the mode
+            return [mode, state]
+        else:
+            return [-1, -1]
+
+    def get_OC_mode(self, from_buffer_if_available=True):
+        """Query the optocoupler switching mode of the switchboard: OFF-GND=0, HV-DC=1, HV-AC=4, OFF-HIGHZ=3"""
+        ocs = self.get_OC_state(from_buffer_if_available)
+        return ocs[0]
+
+    def set_OC_mode(self, oc_mode):
         """
         Set the optocoupler switching mode of the switchboard.
         :param oc_mode: The OC switching mode (GND=0, HV=1, HIGHZ=3)
         :return: True, if the mode was set correctly
         """
-        self.current_device.oc_mode = oc_mode  # update internal model
-        res = self._cast_int(self.send_query("SOC {}".format(oc_mode)))
-        return res == oc_mode
 
-    def set_OC_frequency(self, oc_freq):
+        self.get_OC_cycles()  # this updates the cycles one last time if we are currently in AC mode
+
+        if oc_mode == Switchboard.MODE_AC:
+            if self.oc_freq == 0:
+                raise Exception("No frequency set. To start AC mode, use set_OC_frequency!")
+            else:
+                return self.set_OC_frequency(self.oc_freq)  # start AC mode with previous frequency
+        else:
+            self.oc_mode = oc_mode  # update internal model
+            res = self._cast_int(self.send_query("SOC {}".format(oc_mode)))
+            return res == oc_mode
+
+    def set_OC_frequency(self, oc_freq, reset_cycle_counter=False):
         """
         Set the optocoupler switching frequency of the switchboard.
         :param oc_freq: The OC switching frequency
+        :param reset_cycle_counter: Set True to reset the counter of completed cycles to 0 before starting AC mode
         :return: True, if the frequency was set correctly
         """
-        self.current_device.oc_freq = oc_freq  # update internal model
+        if self.oc_mode == Switchboard.MODE_AC:
+            self.get_OC_cycles()  # this updates the cycles before changing anything, if we were already in AC mode
+        if oc_freq == 0:
+            self.set_OC_mode(Switchboard.MODE_OFF)  # freq=0 -> off. Have to do it this way so mode gets set correctly
+            return
+
+        self.oc_freq = oc_freq  # update internal model
+        self.oc_mode = Switchboard.MODE_AC  # indicate that AC mode is enabled
         res = self._cast_int(self.send_query("SOCF {:.4f}".format(oc_freq)))
+        self.t_oc_cycle_counter = time.perf_counter()  # record the time we started AC mode
+        if reset_cycle_counter:
+            self.oc_cycles = 0.0
         return res == oc_freq
 
-    def get_HB_frequency(self):
-        """Query the H-bridge switching frequency of the switchboard"""
-        return self._cast_int(self.send_query("QHB"))
+    def get_OC_cycles(self):
+        """
+        Get the number of cycles the optocouplers have completed in AC mode.
+        :return: The number of fractional completed cycles (float)
+        """
+        # update cycles if AC mode is currently on
+        if self.oc_mode == Switchboard.MODE_AC:
+            t = time.perf_counter()
+            dt = t - self.t_oc_cycle_counter
+            self.oc_cycles += dt * self.oc_freq  # update no. of cycles
+            self.t_oc_cycle_counter = t  # remember the last time we updated
 
-    def set_HB_witching_mode(self, hb_mode):
+        return self.oc_cycles
+
+    def get_HB_state(self, from_buffer_if_available=True):
+        """Query the optocoupler state of the switchboard"""
+
+        if from_buffer_if_available is True and self.reading_thread.is_alive():
+            with self.buffer_lock:
+                if self.hb_state_buf:  # check if there is anything in it
+                    state = self.hb_state_buf[-1]
+                    self.logging.debug("Taking HB state from buffer: {}".format(state))
+                    return state
+
+        self.logging.debug("Querying HB state")
+        res = self.send_query("QHB")
+        res = res.split(",")
+        if len(res) == 2:
+            mode = self._cast_int(res[0])
+            state = self._cast_int(res[1])
+            if mode == 1:  # AC mode
+                mode = Switchboard.MODE_AC
+            else:
+                mode = state  # if in manual (not AC) mode, the current state must reflect the mode
+            return [mode, state]
+        else:
+            return [-1, -1]  # didn't get a valid response
+
+    def get_HB_mode(self, from_buffer_if_available=True):
+        """Query the optocoupler switching mode of the switchboard: OFF-GND=0, HV-DC=1, HV-AC=4, OFF-HIGHZ=3"""
+        hbs = self.get_HB_state(from_buffer_if_available)
+        return hbs[0]
+
+    def set_HB_mode(self, hb_mode):
         """
         Set the H-bridge switching mode of the switchboard.
         :param hb_mode: The HB switching mode (GND=0, HVA=1, HVB=2, HIGHZ=3)
         :return: True, if the mode was set correctly
         """
-        self.current_device.hb_mode = hb_mode  # update internal model
-        res = self._cast_int(self.send_query("SHB {}".format(hb_mode)))
-        return res == hb_mode
+        self.get_HB_cycles()  # this updates the cycles one last time if we are currently in AC mode
 
-    def set_HB_frequency(self, hb_freq):
+        if hb_mode == Switchboard.MODE_AC:
+            if self.hb_freq == 0:
+                raise Exception("No frequency set. To start AC mode, use set_HB_frequency!")
+            else:
+                return self.set_HB_frequency(self.hb_freq)  # start AC mode with previous frequency
+        else:
+            self.hb_mode = hb_mode  # update internal model
+            res = self._cast_int(self.send_query("SHB {}".format(hb_mode)))
+            return res == hb_mode
+
+    def set_HB_frequency(self, hb_freq, reset_cycle_counter=False):
         """
         Set the H-bridge switching frequency of the switchboard and start AC mode.
         :param hb_freq: The HB switching frequency
+        :param reset_cycle_counter: Set True to reset the completed cycle counter to 0 before starting AC mode
         :return: True, if the frequency was set correctly
         """
-        self.current_device.hb_freq = hb_freq  # update internal model
+
+        if self.oc_mode == Switchboard.MODE_AC:
+            self.get_OC_cycles()  # this updates the cycles before changing anything, if we are were already in AC mode
+        if hb_freq == 0:
+            self.set_HB_mode(Switchboard.MODE_OFF)  # this makes sure the AC cycle number is counted properly
+            return
+
+        self.hb_freq = hb_freq  # update internal model
+        self.hb_mode = Switchboard.MODE_AC  # indicate that AC mode is enabled
         res = self._cast_int(self.send_query("SHBF {:.4f}".format(hb_freq)))
+        self.t_hb_cycle_counter = time.perf_counter()  # record the time we started AC mode
+        if reset_cycle_counter:
+            self.hb_cycles = 0.0
         return res == hb_freq
 
-    def get_output_enabled(self):
+    def get_HB_cycles(self):
+        """
+        Get the number of cycles the H-bridge has completed in AC mode.
+        :return: The number of fractional completed cycles (float)
+        """
+        if self.hb_mode == Switchboard.MODE_AC:
+            t = time.perf_counter()
+            dt = t - self.t_hb_cycle_counter
+            self.hb_cycles += dt * self.hb_freq  # update no. of cycles
+            self.t_hb_cycle_counter = t  # remember the last time we updated
+
+        return self.hb_cycles
+
+    def is_output_enabled(self):
         """Query if the mechanical switch to enable/disable HV output is on (1) or off (0) or unknown (-1)"""
         return self._cast_int(self.send_query("QEnable"))
 
-    # TODO: continue with commands here
+    ###########################################################################
+    # continuous reading #####################################################
+    ###########################################################################
 
     def start_continuous_reading(self, buffer_length=None, reference_time=None, log_file=None):
         """
@@ -743,7 +856,8 @@ class Switchboard:
         self.continuous_voltage_reading_flag.clear()  # reset the flag
         self.voltage_buf = deque(maxlen=self.buffer_length)  # voltage buffer
         self.voltage_setpoint_buf = deque(maxlen=self.buffer_length)  # relay state buffer
-        self.switching_mode_buf = deque(maxlen=self.buffer_length)  # relay state buffer
+        self.oc_state_buf = deque(maxlen=self.buffer_length)  # relay state buffer
+        self.hb_state_buf = deque(maxlen=self.buffer_length)  # relay state buffer
         self.relay_state_buf = deque(maxlen=self.buffer_length)  # relay state buffer
         self.time_buf = deque(maxlen=self.buffer_length)  # Times buffer
         self.reading_thread = Thread()  # Thread for continuous reading
@@ -773,7 +887,8 @@ class Switchboard:
             c_time = time.perf_counter() - t_0  # Current time (since reference)
             voltage = self.get_current_voltage(False)
             voltage_setpoint = self.get_voltage_setpoint()
-            switching_mode = self.get_switching_mode()
+            oc_state = self.get_OC_state(False)
+            hb_state = self.get_HB_state(False)
             relay_state = self.get_relay_state(False)
             # self.logging.debug("Logger thread: Data received")
             # store data in buffer
@@ -781,7 +896,8 @@ class Switchboard:
                 self.time_buf.append(c_time)
                 self.voltage_buf.append(voltage)
                 self.voltage_setpoint_buf.append(voltage_setpoint)
-                self.switching_mode_buf.append(switching_mode)
+                self.oc_state_buf.append(oc_state)
+                self.hb_state_buf.append(hb_state)
                 self.relay_state_buf.append(relay_state)
                 # self.logging.debug("Logger thread: Data stored in buffer (length: {})".format(len(self.voltage_buf)))
             # write data to log file
@@ -790,7 +906,7 @@ class Switchboard:
                     if relay_state is None:
                         relay_state = [-1] * 6
                         self.logging.debug("Logger thread: Invalid relay state ('None')")
-                    data = [datetime.now(), c_time, voltage_setpoint, voltage, switching_mode, *relay_state]
+                    data = [datetime.now(), c_time, voltage_setpoint, voltage, *oc_state, *hb_state, *relay_state]
                     row = dict(zip(self.log_data_fields, data))
                     self.log_writer.writerow(row)
                     # self.logging.debug("Logger thread: Data written to file".format(len(self.voltage_buf)))
@@ -813,30 +929,30 @@ class Switchboard:
         :param initial_t: If not None, all time values in the buffer will be shifted so that the first value in
         the buffer is equal to initialt.
         :param copy: Legacy argument. This has no effect since a copy is always created when reading the buffer.
-        :return: The voltage buffer (times, voltages, voltage_sps, relay_states, sw_modes) as five 1-D numpy arrays
+        :return: The voltage buffer (times, voltages, voltage_sps, relay_states, oc_states) as five 1-D numpy arrays
         """
         with self.buffer_lock:  # Get Data lock for multi threading
             times = np.array(self.time_buf)  # convert to array (creates a copy)
             voltages = np.array(self.voltage_buf)  # convert to array (creates a copy)
             voltage_sps = np.array(self.voltage_setpoint_buf)  # convert to array (creates a copy)
             relay_states = np.array(self.relay_state_buf)  # convert to array (creates a copy)
-            sw_modes = np.array(self.switching_mode_buf)  # convert to array (creates a copy)
+            oc_states = np.array(self.oc_state_buf)  # convert to array (creates a copy)
+            hb_states = np.array(self.oc_state_buf)  # convert to array (creates a copy)
             if clear_buffer:
                 self.time_buf.clear()
                 self.voltage_buf.clear()
                 self.voltage_setpoint_buf.clear()
-                self.switching_mode_buf.clear()
+                self.oc_state_buf.clear()
+                self.hb_state_buf.clear()
                 self.relay_state_buf.clear()
 
         if initial_t is not None:
             times = times - times[0] + initial_t  # shift starting time to the specified initial time
 
-        return times, voltages, voltage_sps, relay_states, sw_modes  # Return time and positions
+        return times, voltages, voltage_sps, relay_states, oc_states, hb_states  # Return time and positions
 
 
 def test_slow_voltage_rise():
-    import matplotlib.pyplot as plt
-
     sb = Switchboard()
     sb.open(with_continuous_reading=True)
     sb.set_relays_on()
@@ -849,7 +965,7 @@ def test_slow_voltage_rise():
     time.sleep(1)
     sb.set_voltage_no_overshoot(0)
     sb.close()
-    times, voltages, voltage_sps, relay_states, sw_modes = sb.get_data_buffer()
+    times, voltages, voltage_sps, relay_states, oc_states, hb_states = sb.get_data_buffer()
     plt.plot(times, voltages)
     plt.xlabel("Time (s)")
     plt.ylabel("Voltage (V)")
@@ -1015,10 +1131,6 @@ def tune_pid():
     steps = 3
     wait_period = 3
 
-    sb.set_relays_off()  # make sure all are off
-    sb.set_switching_mode(0)
-    sb.set_voltage(0)
-
     time.sleep(0.1)
 
     sb.set_relays_on(samples)  # switch on only the ones we want
@@ -1029,7 +1141,7 @@ def tune_pid():
 
     time.sleep(0.1)
 
-    sb.set_switching_mode(1)
+    sb.set_output_on()
 
     # ramp ###########################
     for i in range(1, steps):
@@ -1043,17 +1155,16 @@ def tune_pid():
     print(Vset, "V")
     time.sleep(wait_period)
 
-    sb.set_frequency(freq)
-    sb.set_switching_mode(2)
+    sb.set_OC_frequency(freq)
     print("Cycling at", freq, "Hz")
     time.sleep(wait_period)
 
-    sb.set_switching_mode(0)
+    sb.set_OC_mode(Switchboard.MODE_OFF)
     sb.set_voltage(0.95 * Vset)
     print("Stopped cycling. Switched OC off.")
     time.sleep(1)
 
-    sb.set_switching_mode(1)
+    sb.set_OC_mode(Switchboard.MODE_DC)
     sb.set_voltage(Vset)
     print("Switched DC on.")
     time.sleep(wait_period)
@@ -1067,7 +1178,7 @@ def tune_pid():
     time.sleep(2 * wait_period)
 
     sb.set_voltage(0)
-    sb.set_switching_mode(0)
+    sb.set_output_off()
     sb.set_relays_off()
     print("Switched everything off.")
     time.sleep(3)
@@ -1076,9 +1187,9 @@ def tune_pid():
 
     # plot #####################
 
-    tV, V, Vsp, rel, sw_mode = sb.get_data_buffer()
+    tV, V, Vsp, rel, oc_mode, hb_mode = sb.get_data_buffer()
 
-    v_on = sw_mode > 0
+    v_on = oc_mode[0] > 0
     v_real = V * v_on
     vmax = np.amax(v_real)
     ivmax = np.argmax(v_real)
@@ -1090,7 +1201,7 @@ def tune_pid():
     ax1.plot(tV, Vsp, color="C0")
     ax1.plot(tV, V, color="C1")
     ax2 = ax1.twinx()
-    ax2.plot(tV, sw_mode, color="C2")
+    ax2.plot(tV, oc_mode[0], color="C2")
     ax2.set_ylabel("OC on", color="C2")
     ax2.set_yticks([0, 1, 2])
     ax2.set_yticklabels(["Off", "DC", "AC {} Hz".format(freq)])

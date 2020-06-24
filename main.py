@@ -13,7 +13,7 @@ from src.fileio.DataSaver import DataSaver
 from src.fileio.ImageSaver import ImageSaver
 from src.fileio.config import read_config, write_config
 from src.gui import SetupDialog, Screen
-from src.hvps.Switchboard import Switchboardv2
+from src.hvps.Switchboard import Switchboard
 from src.image_processing import ImageCapture, StrainDetection
 from src.measurement.keithley import DAQ6510
 
@@ -63,7 +63,7 @@ class NERD:
 
         # connect to HVPS
         try:
-            self.hvps = Switchboardv2()
+            self.hvps = Switchboard()
             self.hvps.open(self.config["com_port"])
         except Exception as ex:
             self.logging.error("Unable to connect to HVPS: {}".format(ex))
@@ -130,7 +130,6 @@ class NERD:
 
         max_voltage = self.config["voltage"]
         min_voltage = self.hvps.minimum_voltage
-        # TODO: check why min voltage is 300 V (officially 50, but doesn't always seem to work)
         nsteps = self.config["steps"]
         if nsteps == 0:
             voltage_step = 0
@@ -145,9 +144,6 @@ class NERD:
 
         ac_mode = self.config["ac_mode"]
         ac_frequency = self.config["ac_frequency_hz"]
-        ac_cycle_count = np.ceil(duration_high_s * ac_frequency)
-        ac_cycle_count = max(ac_cycle_count, 1)  # make sure it's at least 1, otherwise the HVPS will cycle indefinitely
-        ac_cycle_count = min(ac_cycle_count, 65000)  # make sure it doesn't exceed max value the HVPS can store
         ac_wait_before_measurement = self.config["ac_wait_before_measurement_s"]
 
         # set up state machine #############################################################
@@ -173,8 +169,6 @@ class NERD:
         breakdown_occurred = False
         failed_deas = []
         cycles_completed = 0
-        cycles_expected = 0
-        total_cycles = 0
         ac_finished = False  # indicates if the current set of cycles was completed
         ac_paused = False  # indicated if cycling is currently paused (for measurement or breakdown detection)
 
@@ -190,8 +184,9 @@ class NERD:
 
         self.hvps.set_pid_gains((0.2, 1.0, 0.005))  # make sure we're using the correct gains to avoid voltage spikes
 
-        # TODO: enable only active channels, once this is supported by the switchboard
-        self.hvps.set_relay_auto_mode()  # enable relay auto mode for automatic short detection. Opens all channels.
+        self.hvps.set_HB_mode(1)
+        # enable relay auto mode for selected channels
+        self.hvps.set_relay_auto_mode(reset_time=0, relays=self.active_deas)
         hvps_log_file = "{}/{} hvps log.csv".format(dir_name, session_name)
         self.hvps.start_continuous_reading(buffer_length=1, log_file=hvps_log_file)
 
@@ -210,37 +205,16 @@ class NERD:
                 msg = "waiting low: {:.0f}/{}s".format(dt_state_change, duration_low_s)
                 self.logging.info(msg)
             elif current_state == STATE_RAMP:
-                self.hvps.set_voltage(current_target_voltage)
-                self.hvps.set_switching_mode(1)
                 msg = "Step {}/{}, current voltage: {} V, next step in {:.0f}/{} s"
                 msg = msg.format(current_step, nsteps, current_target_voltage, dt_state_change, step_duration_s)
                 self.logging.info(msg)
             elif current_state == STATE_WAITING_HIGH:
                 self.hvps.set_voltage(current_target_voltage)
+                msg = "Waiting high: {:.0f}/{} s".format(dt_state_change, duration_high_s)
                 if ac_mode:
                     # check how many cycles have been completed
-                    prev_cycles_completed = cycles_completed  # remember how many we've had previously
-                    cycles_completed, cycles_expected = self.hvps.get_cycle_number()
-                    # get switching mode so we can see if it switched back from 2 to 0
-                    sw_mode = self.hvps.get_switching_mode()
-
-                    if cycles_expected == 0:  # reset due to reconnect
-                        cycles_expected = ac_cycle_count - prev_cycles_completed
-                        self.hvps.set_cycle_number(cycles_expected)  # finish remaining cycles
-                        cycles_completed = 0  # should already be 0 in any case, but just to be sure
-                        self.hvps.set_frequency(ac_frequency)
-                        self.hvps.set_switching_mode(2)
-                        msg = "HVPS was reset. Restarting cycles ({} cycles remaining)".format(cycles_expected)
-                        total_cycles += prev_cycles_completed  # need to record these here or they'll be lost
-
-                    elif cycles_completed == 0 and sw_mode == 0:  # finished current set of cycles
-                        ac_finished = True
-                        msg = "Cyclic actuation finished."
-                    else:
-                        msg = "Cyclic actuation: {}/{} cycles".format(cycles_completed, cycles_expected)
-                else:
-                    self.hvps.set_switching_mode(1)  # make sure it remains 1 (DC), in case it was reset
-                    msg = "Waiting high: {:.0f}/{} s".format(dt_state_change, duration_high_s)
+                    cycles_completed = self.hvps.get_OC_cycles()
+                    msg += " ({:.0f} cycles)".format(cycles_completed)
                 self.logging.info(msg)
             else:
                 logging.critical("Unknown state in the state machine")
@@ -269,17 +243,10 @@ class NERD:
                         new_state = STATE_WAITING_HIGH
                         new_target_voltage = max_voltage
             elif current_state == STATE_WAITING_HIGH:
-                if ac_mode:
-                    finished = ac_finished
-                else:
-                    finished = dt_state_change > duration_high_s  # in DC mode, change state after time has elapsed
+                finished = dt_state_change > duration_high_s  # in DC mode, change state after time has elapsed
                 if finished:
                     new_state = STATE_WAITING_LOW
                     new_target_voltage = 0
-                    if ac_mode:
-                        cycles_completed = cycles_expected  # because cycles completed cycled back to 0
-                    else:
-                        cycles_completed = 1
             else:
                 logging.critical("Unknown state in the state machine")
                 raise Exception
@@ -327,7 +294,7 @@ class NERD:
                 time_pause_started = time.perf_counter()  # measure how long it took
 
                 if ac_active:
-                    self.hvps.set_switching_mode(1)  # disable AC while testing
+                    self.hvps.set_OC_mode(Switchboard.MODE_DC)  # disable AC while testing
                     ac_paused = True
                     # will be resumed later after we know if breakdown occurred or not
 
@@ -364,7 +331,7 @@ class NERD:
             else:  # no breakdown
                 if ac_paused and not measurement_due:
                     self.logging.debug("Re-enabling AC mode after pause")
-                    self.hvps.set_switching_mode(2)  # re-enable AC after testing if no breakdown occurred
+                    self.hvps.set_OC_mode(Switchboard.MODE_AC)  # re-enable AC after testing if no breakdown occurred
                     ac_paused = False
 
                 # we don't need the prev DEA state anymore if there was no breakdown (otherwise we need to record it)
@@ -410,9 +377,13 @@ class NERD:
                     if time_pause_started == -1:
                         self.logging.debug("Suspending AC mode in preparation for measurement")
                         # when switching from AC to DC, a voltage spike occurs due to the sudden drop in current
-                        self.hvps.set_switching_mode(0)  # turn off so DC voltage can stabilize and we don't overshoot
+                        # turn off so DC voltage can stabilize and we don't overshoot
+                        self.hvps.set_OC_mode(Switchboard.MODE_OFF)
+                        self.hvps.set_voltage(int(current_target_voltage * 0.9))  # reduce voltage temporarily
                         time.sleep(1)  # wait for voltage to stabilize
-                        self.hvps.set_switching_mode(1)  # set to DC. number of completed cycles will be remembered
+                        # set to DC. number of completed cycles will be remembered
+                        self.hvps.set_OC_mode(Switchboard.MODE_DC)
+                        self.hvps.set_voltage(current_target_voltage)  # raise voltage back to the target
                         ac_paused = True
                         time_pause_started = time.perf_counter()  # record how long AC was suspended
                         continue
@@ -459,7 +430,7 @@ class NERD:
                 if ac_paused:
                     ac_paused = False  # pause has ended in any case
                     if not ac_finished:
-                        self.hvps.set_switching_mode(2)  # set back to AC
+                        self.hvps.set_OC_mode(Switchboard.MODE_AC)  # set back to AC
                         self.logging.debug("Measurement complete. Resuming AC cycling.")
                     else:
                         self.logging.debug("AC cycling finished before measurement. AC cycling is not resumed.")
@@ -500,7 +471,7 @@ class NERD:
                 saver.write_data(now_tstamp,
                                  now - time_started,
                                  duration_at_max_V,
-                                 total_cycles + cycles_completed,
+                                 cycles_completed,
                                  current_state,
                                  current_target_voltage,
                                  measured_voltage,
@@ -557,20 +528,14 @@ class NERD:
                     self.logging.warning("Failed to set voltage")
 
                 if new_state == STATE_WAITING_HIGH and ac_mode:
-                    self.hvps.set_cycle_number(ac_cycle_count)  # set the requested number cycles
-                    self.hvps.set_frequency(ac_frequency)
-                    self.hvps.set_switching_mode(2)
+                    self.hvps.set_OC_frequency(ac_frequency)  # this starts AC mode
                     ac_finished = False
                     ac_active = True
                     ac_paused = False
                     self.logging.debug("Started AC cyling")
                 else:
-                    self.hvps.set_switching_mode(1)  # anything but high phase in AC mode requires DC
+                    self.hvps.set_OC_mode(Switchboard.MODE_DC)  # anything but high phase in AC mode requires DC
                     ac_active = False
-
-                    if new_state == STATE_WAITING_LOW:
-                        total_cycles += cycles_completed
-                        cycles_completed = 0  # set to 0 again because it doesn't get updated anymore in DC mode
 
                 current_state = new_state
                 current_step = new_step
