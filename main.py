@@ -323,9 +323,10 @@ class NERD:
 
             if breakdown_occurred:
                 # if all relays are off and more than one DEA "failed" at once, it's probably due to a reset
-                # TODO: fix this so we don't get stuck here at the end of a test if multiple DEAs failed at one
+                # TODO: fix this so we don't get stuck here at the end of a test if multiple DEAs failed at once
                 if dea_state_el_new.count(0) == 6 and len(failed_deas) > 1:
-                    self.hvps.set_relay_auto_mode()  # must have been reset -> re-enable relays in auto mode
+                    # TODO: re-enable only channels that haven't already failed
+                    self.hvps.set_relay_auto_mode(0, self.active_deas)  # must have been reset. re-enable auto mode
                     continue
 
                 self.logging.info("Breakdown detected! DEAs: {}".format(failed_deas))

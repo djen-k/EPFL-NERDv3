@@ -1,14 +1,16 @@
 import csv
 import logging
+import time
 from collections import deque
 from datetime import datetime
 from sys import stdout
 from threading import Thread, Event, Lock, RLock
+import numpy as np
 
 import serial
 import serial.tools.list_ports
 
-from src.hvps.daqmx import *
+# from src.hvps.daqmx import *
 
 LIB_VER = "2.0"  # Version of this library
 FIRM_VER = 20  # Firmware version That this library expects to run on the HVPS
@@ -438,10 +440,12 @@ class Switchboard:
             if elapsed == 0:  # only write message once
                 self.logging.debug("Waiting for measured output voltage to reach the set point...")
             time.sleep(0.05)
-            if self.is_testing():
+            while self.is_testing():
+                self.logging.debug("Switchboard is testing for shorts...")
+                time.sleep(0.5)
                 start = time.perf_counter()  # if SB is busy checking for shorts, don't start counting timeout
-            else:
-                elapsed = time.perf_counter() - start
+
+            elapsed = time.perf_counter() - start
 
         return True  # if we reached here, it must have been set correctly
 
@@ -624,6 +628,8 @@ class Switchboard:
         :param relays: List of indices (0-5) of the channels to switch on in auto mode
         :return: True, if the relay state was set successfully
         """
+        if relays is None:
+            relays = range(6)  # all channels
 
         rel_bin = [int(i in relays) for i in range(6)]  # get desired state (0/1) for each relay
         # compose string of which relays to switch on
@@ -1269,7 +1275,7 @@ class HVMonitor:
         self.p_probe = np.poly1d(probe_fit)
 
         # init DaqMx
-        self.daq = DaqMx()
+        self.daq = None  # DaqMx()
 
     def analog_measurement(self, sampling_frequency, sample_number):
         tdata, data = self.daq.set_analog_measurement(['/Dev1/Ai0'], sampling_frequency, typeEch='fini',
