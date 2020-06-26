@@ -6,5 +6,5 @@
 /config.txt
 *.mat
 /src/image_processing/logs/
-/src/measurement/voltage log.csv
+/src/measurement/voltage log*
 /src/gui/imageviewer.py

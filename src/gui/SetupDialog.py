@@ -9,7 +9,7 @@ from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QApplication
 
 from src.gui import QtImageTools, Screen
-from src.hvps.Switchboard import Switchboardv2
+from src.hvps.Switchboard import Switchboard
 from src.image_processing import ImageCapture, StrainDetection
 from src.measurement.keithley import DAQ6510
 
@@ -49,7 +49,7 @@ class SetupDialog(QtWidgets.QDialog):
         self._strain_detector = None  # will be set when a reference is recorded
         self.n_cams = 0  # we don't know of any available cameras yet
 
-        self._hvps = Switchboardv2()  # create switchboard instance. not connected yet
+        self._hvps = Switchboard()  # create switchboard instance. not connected yet
         self._daq = DAQ6510()  # create DAQ instance. not yet connected
 
         # return values

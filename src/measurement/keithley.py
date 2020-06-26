@@ -8,7 +8,7 @@ import numpy as np
 import scipy.io as sio
 import visa
 
-from src.hvps.Switchboard import Switchboardv2
+from src.hvps.Switchboard import Switchboard
 from src.image_processing import ImageCapture
 from src.image_processing.StrainDetection import StrainDetector
 
@@ -613,7 +613,7 @@ def test_current_measurement_simple():
 
 
 def test_current_measurements(nplc=1):
-    hvps = Switchboardv2()
+    hvps = Switchboard()
     hvps.open()
     print("Connected to HVPS", hvps.get_name())
     print("Relays on:", hvps.set_relays_on([0]))
@@ -826,7 +826,7 @@ def measure_resistance_sequence():
 
     # Switchboard ########################################
 
-    hvps = Switchboardv2()
+    hvps = Switchboard()
     hvps.open()
     print("Connected to HVPS", hvps.get_name())
     print("Relays on:", hvps.set_relays_on())
@@ -961,7 +961,7 @@ def measure_sequence_all():
 
     # Switchboard ########################################
 
-    hvps = Switchboardv2()
+    hvps = Switchboard()
     hvps.open()
     print("Connected to HVPS", hvps.get_name())
     print("Relays on:", hvps.set_relays_on())
@@ -1108,7 +1108,7 @@ def test_digitize_current():
     daq.get_instrument_description()
     daq.set_data_format('f')
 
-    hvps = Switchboardv2()
+    hvps = Switchboard()
     hvps.open()
     print("Connected to HVPS", hvps.get_name())
     print("Relays on:", hvps.set_relays_on())
@@ -1215,7 +1215,7 @@ def test_digitize_voltage():
     daq.get_instrument_description()
     daq.set_data_format('f')
 
-    hvps = Switchboardv2()
+    hvps = Switchboard()
     hvps.open()
     print("Connected to HVPS", hvps.get_name())
     print("Relays on:", hvps.set_relays_on([0]))

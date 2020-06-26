@@ -182,7 +182,9 @@ class NERD:
         time_pause_started = -1
         duration_at_max_V = 0
 
-        self.hvps.set_pid_gains((0.2, 1.0, 0.005))  # make sure we're using the correct gains to avoid voltage spikes
+        # TODO: check PID gains
+        self.hvps.set_pid_gains((0.15, 1.0, 0.0))  # make sure we're using the correct gains to avoid voltage spikes
+        # self.hvps.set_pid_gains((0.2, 1.0, 0.005))  # make sure we're using the correct gains to avoid voltage spikes
 
         self.hvps.set_HB_mode(1)
         # enable relay auto mode for selected channels

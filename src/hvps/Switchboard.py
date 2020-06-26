@@ -1,13 +1,14 @@
 import csv
 import logging
-import time
 from collections import deque
 from datetime import datetime
+from sys import stdout
 from threading import Thread, Event, Lock, RLock
 
-import numpy as np
 import serial
 import serial.tools.list_ports
+
+from src.hvps.daqmx import *
 
 LIB_VER = "2.0"  # Version of this library
 FIRM_VER = 20  # Firmware version That this library expects to run on the HVPS
@@ -31,7 +32,7 @@ class Switchboard:
     def __init__(self, port=None):
         super().__init__()
         self.logging = logging.getLogger("Switchboard")  # change logger to "Switchboard"
-        self.logging.setLevel(logging.INFO)  # TODO: decide globally who logs at what level
+        # self.logging.setLevel(logging.INFO)  # TODO: decide globally who logs at what level
 
         self.port = port
         self.name = ''
@@ -77,12 +78,6 @@ class Switchboard:
 
     def __del__(self):
         try:
-            self.set_OC_mode(0)
-            self.set_HB_mode(0)
-            self.set_voltage(0, block_while_testing=True)
-            self.set_relays_off()
-            self.stop_voltage_reading()
-            self.reading_thread.join(1)
             self.close()
         except Exception as ex:
             self.logging.warning("Unable to switch off HVPS and relays: {}".format(ex))
@@ -95,7 +90,7 @@ class Switchboard:
     def detect(n=0):
         """Detect available HVPS"""
         logger = logging.getLogger("Switchboard")  # change logger to "Switchboard"
-
+        logger.debug("Detecting available switchboards")
         serial_ports = serial.tools.list_ports.comports()
         available_switchboards = []
         for ser in serial_ports:
@@ -103,16 +98,21 @@ class Switchboard:
                 sb = Switchboard(ser.device)
                 try:  # see if we can open it
                     sb.open(with_continuous_reading=False)
-                    sb.close()
                     logger.info("Device {} found at port {}".format(sb.name, sb.port))
                     available_switchboards.append(sb)
+                    sb.close()
 
                     if 0 < n == len(available_switchboards):
                         break  # already found the desired number of available devices
                 except Exception as ex:
                     logger.debug("Unable to connect to device on port {}. Exception: {}".format(sb.port, ex))
 
-        logger.info("Switchboard detection done. Found {} devices.".format(len(available_switchboards)))
+        if not available_switchboards:
+            logger.warning("No switchboards found!")
+        elif len(available_switchboards) < n:
+            logger.warning("The requested number of switchboards could not be found!")
+        else:
+            logger.info("Switchboard detection done. Found {} devices.".format(len(available_switchboards)))
         return available_switchboards
 
     def _open_connection(self):
@@ -166,7 +166,9 @@ class Switchboard:
 
         if self.port is None:  # if not defined, autodetect HVPS
             sb = Switchboard.detect(1)[0]  # get the first switchboard we can find
-            self.open(sb.port, with_continuous_reading)
+            port = sb.port
+            del sb  # get rid of the switchboard object to release the com port
+            self.open(port, with_continuous_reading)
         elif isinstance(self.port, int):  # specified as index  -> pick from list of available ports
             sbs = Switchboard.detect()  # get the first switchboard we can find
             if len(sbs) > self.port:
@@ -190,15 +192,17 @@ class Switchboard:
 
     def close(self):
         """Closes connection with the HVPS"""
-        self.stop_voltage_reading()
-        time.sleep(0.1)
-        self.serial_com_lock.acquire()
-        if self.ser.is_open:
-            self.set_voltage(0, block_while_testing=True)  # set the voltage to 0 as a safety measure
-            self.set_relays_off()
-            self.ser.close()
-        self.is_open = False
-        self.serial_com_lock.release()
+        if self.is_open:
+            self.stop_voltage_reading(wait=True)
+            if self.ser.is_open:
+                with self.serial_com_lock:
+                    self.set_voltage(0, block_while_testing=True)  # set the voltage to 0 as a safety measure
+                    self.set_output_off()  # disable OCs and H-bridge
+                    self.set_relays_off()
+                    self.ser.close()
+            # time.sleep(3)  # wait for serial port to properly close
+            self.is_open = False
+            self.logging.info("Connection to {} closed.".format(self.name))
 
     def dirty_reconnect(self):
 
@@ -250,21 +254,6 @@ class Switchboard:
     # communication ###########################################################
     ###########################################################################
 
-    @staticmethod
-    def check_connection(func):
-        """Decorator for checking connection and acquiring multithreading lock"""
-
-        def is_connected_wrapper(*args):
-            """Wrapper"""
-            if args[0].is_open:
-                with args[0].serial_com_lock:
-                    res = func(*args)
-                return res
-            else:
-                return None
-
-        return is_connected_wrapper
-
     def _write_hvps(self, cmd):
         """
         Write a command to the HVPS via serial
@@ -307,7 +296,7 @@ class Switchboard:
 
                 if res.startswith("["):  # info/warning/error
                     # TODO: log switchboard messages properly and raise flag in case of warnings
-                    self.logging.warning("Message from Switchboard: {}".format(res))
+                    self.logging.info("Message from Switchboard: {}".format(res))
 
                     res = self._read_hvps()  # read another line
                 elif res.startswith("Err"):
@@ -322,15 +311,21 @@ class Switchboard:
         self.logging.debug("Response from HVPS: {}".format(res))
         return res
 
-    @check_connection
     def send_query(self, cmd):
         """
         Send a command to the HVPS and read the response.
         :param cmd: The command to send to the HVPS (string or bytes)
         :return: the response (as string) or None, if no response was received
         """
-        self._write_hvps(cmd)
-        return self._read_hvps()
+        if self.is_open:
+            with self.serial_com_lock:
+                self.logging.debug("Sending query: {}".format(cmd))
+                self._write_hvps(cmd)
+                res = self._read_hvps()
+                self.logging.debug("Response: {}".format(res))
+            return res
+        else:
+            raise Exception("Switchboard is not connected!")
 
     def _cast_int(self, data):
         try:
@@ -355,7 +350,7 @@ class Switchboard:
             relay_mode = self._cast_int(str_state[0])  # is either the relay mode or just "Relay state" (-> -1)
             # TODO: use/store relay mode somehow
             state = str_state[1].split(",")  # split individual states
-            state = [self._cast_int(r) for r in state]  # convert all to int
+            state = [self._cast_int(r) for r in state if r]  # convert to int if string is not empty
         except Exception as ex:
             self.logging.warning("Failed to parse relay state: {}. Error: {}".format(str_state, ex))
             return None  # return None to indicate something is wrong
@@ -363,6 +358,7 @@ class Switchboard:
         if len(state) == 6:  # output is only valid if there is a state for each relay
             return state
         else:
+            self.logging.warning("Invalid response. Received {} values instead of 6.".format(len(state)))
             return None  # return None to indicate something is wrong
 
     ###########################################################################
@@ -633,7 +629,7 @@ class Switchboard:
         # compose string of which relays to switch on
         rel_str = ""
         for rel in rel_bin:
-            rel_str += rel
+            rel_str += str(rel)
         self.relay_state = rel_bin  # keep state in memory
 
         self.logging.debug("Enabling auto mode with timeout {} s for channels {}".format(reset_time, rel_str))
@@ -822,7 +818,7 @@ class Switchboard:
     # continuous reading #####################################################
     ###########################################################################
 
-    def start_continuous_reading(self, buffer_length=None, reference_time=None, log_file=None):
+    def start_continuous_reading(self, buffer_length=None, reference_time=None, log_file=None, append=True):
         """
         Start continuous voltage reading in a separate thread. The data is stored in an internal buffer and can be
         retrieved via 'get_voltage_buffer'.
@@ -831,6 +827,7 @@ class Switchboard:
         synchronizing data acquisition from different devices. The reference time must be generated by calling
         'time.perf_counter()'.
         :param log_file: Name of the log file to store voltage data. If None, no data is written to file.
+        :param append: Set False to overwrite any existing log file. Otherwise, new data is appended.
         """
         # check if it's already running
         if self.reading_thread is not None and self.reading_thread.is_alive():
@@ -842,7 +839,11 @@ class Switchboard:
         if log_file is not None:
             self.logging.debug("Setting up log file: {}".format(log_file))
             try:
-                self.log_file = open(log_file, mode="a", newline='')
+                if append:
+                    fmode = 'a'  # 'append' will append data from this session to the end of the file (if it exists)
+                else:
+                    fmode = 'w'  # 'write' will overwrite the contents of the existing file (if there is one)
+                self.log_file = open(log_file, mode=fmode, newline='')
                 self.log_writer = csv.DictWriter(self.log_file, fieldnames=self.log_data_fields)
                 self.log_writer.writeheader()
             except OSError as ex:
@@ -865,9 +866,12 @@ class Switchboard:
         self.reading_thread.daemon = True  # make daemon so it terminates if main thread dies (from some error)
         self.reading_thread.start()  # Starting Thread
 
-    def stop_voltage_reading(self):
+    def stop_voltage_reading(self, wait=False, wait_timeout=1.0):
         """Routine for stoping continuous position reading"""
         self.continuous_voltage_reading_flag.set()  # Set Flag to False
+        # if requested, wait for thread to finish
+        if self.reading_thread.is_alive() and wait:
+            self.reading_thread.join(wait_timeout)
 
     def _continuous_voltage_reading(self):
         """Method for continuous reading"""
@@ -922,13 +926,12 @@ class Switchboard:
                 self.log_writer = None
                 # self.logging.debug("Switchboard log file closed")
 
-    def get_data_buffer(self, clear_buffer=True, initial_t=None, copy=False):
+    def get_data_buffer(self, clear_buffer=True, initial_t=None):
         """
         Retrieve the voltage buffer. By default, the buffer is cleared after reading
         :param clear_buffer: Set true to clear the buffer after it has been read. (default: True)
         :param initial_t: If not None, all time values in the buffer will be shifted so that the first value in
         the buffer is equal to initialt.
-        :param copy: Legacy argument. This has no effect since a copy is always created when reading the buffer.
         :return: The voltage buffer (times, voltages, voltage_sps, relay_states, oc_states) as five 1-D numpy arrays
         """
         with self.buffer_lock:  # Get Data lock for multi threading
@@ -974,13 +977,14 @@ def test_slow_voltage_rise():
 
 
 def test_switchboard():
-    sb = Switchboard()
+    sb = Switchboard.detect(1)[0]
     sb.open()
     t_start = time.perf_counter()
     time.sleep(1)
-    sb.start_continuous_reading(reference_time=t_start, buffer_length=1, log_file="voltage log.csv")
+    sb.start_continuous_reading(reference_time=t_start, log_file="voltage log.csv", append=False)
     Vset = 450
     freq = 2
+    twait = 5
     cycles_remaining = []
     tc = []
     print(sb.get_name())
@@ -993,40 +997,41 @@ def test_switchboard():
     # print(sb.set_relays_on())
     # print(sb.get_relay_state())
     # gains = sb.set_pid_gains((0.26, 2.1, 0.005))
-    # gains = sb.get_pid_gains()
-    # print("PID gains:", gains)
+    gains = sb.get_pid_gains()
+    print("PID gains:", gains)
 
     # sb.set_output_off()  # = set_switching_mode(0)
     # print(sb.set_relay_auto_mode())
     sb.set_relays_on()
+    # sb.set_output_on()
     time.sleep(0.3)
     print(sb.get_relay_state())
     # time.sleep(1)
     # print(sb.get_relay_state())
     # print(sb.set_relay_state(3, 1))
     # time.sleep(1)
-    print(sb.set_relays_off())
+    # print(sb.set_relays_off())
     # time.sleep(1)
     sb.set_output_on()
     print(sb.get_current_voltage(), "V")
+    sb.set_voltage(1000)
+    time.sleep(twait)
+    print(sb.get_current_voltage(), "V")
+    sb.set_voltage(3000)
+    time.sleep(twait)
+    print(sb.get_current_voltage(), "V")
     sb.set_voltage(500)
-    time.sleep(0.5)
-    print(sb.get_current_voltage(), "V")
-    sb.set_voltage(800)
-    time.sleep(0.5)
-    print(sb.get_current_voltage(), "V")
-    sb.set_voltage(400)
-    time.sleep(0.5)
+    time.sleep(twait)
     print(sb.get_current_voltage(), "V")
     sb.set_voltage(0)
     # print("sp: ", sb.get_voltage_setpoint())
-    time.sleep(0.3)
+    time.sleep(twait)
     print(sb.get_current_voltage(), "V")
-    sb.set_relays_on()
-    time.sleep(0.3)
-    print(sb.get_relay_state())
-    print(sb.set_relays_off())
-    time.sleep(0.01)
+    # sb.set_relays_on()
+    # time.sleep(0.3)
+    # print(sb.get_relay_state())
+    # print(sb.set_relays_off())
+    # time.sleep(0.01)
     # sb.set_frequency(freq)
     # sb.set_cycle_number(25)
     # tc.append(time.perf_counter() - t_start)
@@ -1116,6 +1121,47 @@ def test_switchboard():
     # print(sb.get_current_voltage())
     # print(sb.get_voltage_setpoint())
     # print(sb.close())
+
+
+def test_voltage_sequence():
+    sb = Switchboard.detect(1)[0]
+    sb.open()
+    buf_length = 100000
+    sb.start_continuous_reading(buffer_length=buf_length)
+    Vset = 450
+    freq = 2
+    twait = 5
+    cycles_remaining = []
+    tc = []
+    print(sb.get_name())
+    # print("sp: ", sb.get_voltage_setpoint())
+    # print("now: ", sb.get_current_voltage())
+    # print("set: ", sb.set_voltage(500))
+    # print("sp: ", sb.get_voltage_setpoint())
+    # time.sleep(2)
+    # print("now: ", sb.get_current_voltage())
+    # print(sb.set_relays_on())
+    # print(sb.get_relay_state())
+    # gains = sb.set_pid_gains((0.26, 2.1, 0.005))
+    gains = sb.get_pid_gains()
+    print("PID gains:", gains)
+
+    # sb.set_output_off()  # = set_switching_mode(0)
+    # print(sb.set_relay_auto_mode())
+    sb.set_relays_on()
+    # sb.set_output_on()
+    time.sleep(0.3)
+    print(sb.get_relay_state())
+    # time.sleep(1)
+    # print(sb.get_relay_state())
+    # print(sb.set_relay_state(3, 1))
+    # time.sleep(1)
+    # print(sb.set_relays_off())
+    # time.sleep(1)
+    sb.set_output_on()
+    print(sb.get_current_voltage(), "V")
+    sb.set_voltage(1000)
+    time.sleep(twait)
 
 
 def tune_pid():
@@ -1215,9 +1261,29 @@ def tune_pid():
     plt.show()
 
 
+class HVMonitor:
+
+    def __init__(self):
+        # load probe parameters
+        probe_fit = np.load("src\\hvps\\probe_fit_inverse_2.npy")
+        self.p_probe = np.poly1d(probe_fit)
+
+        # init DaqMx
+        self.daq = DaqMx()
+
+    def analog_measurement(self, sampling_frequency, sample_number):
+        tdata, data = self.daq.set_analog_measurement(['/Dev1/Ai0'], sampling_frequency, typeEch='fini',
+                                                      sample_number=sample_number)
+        data = self.p_probe(np.mean(data))
+
+        return tdata, data
+
+
 if __name__ == '__main__':
     import matplotlib.pyplot as plt
 
-    # test_switchboard()
-    tune_pid()
+    logging.basicConfig(level=logging.INFO, stream=stdout)
+
+    test_switchboard()
+    # tune_pid()
     # test_slow_voltage_rise()
