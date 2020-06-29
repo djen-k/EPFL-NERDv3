@@ -51,6 +51,7 @@ class Switchboard:
         self.t_oc_cycle_counter = 0  # last time the oc cycle count was queried (to calculate no. of cycles since then)
         self.hb_cycles = 0  # number of completed cycles of the H-bridge
         self.t_hb_cycle_counter = 0  # last time the hb cycle count was queried (to calculate no. of cycles since then)
+        self.relay_mode = 0
         self.relay_state = [0] * 6
         self.pid_gains = [0, 0, 0]
 
@@ -224,8 +225,14 @@ class Switchboard:
 
                 # resume operation by restoring the previous state
                 self.set_voltage(self.vset)
-                self.logging.info("Resetting switchboard state after reconnect")
-                self.set_relay_auto_mode(0, self.relay_state)
+
+                if self.relay_mode == 1:
+                    self.logging.info("Switching relays back on after reconnect: {}".format(self.relay_state))
+                    self.set_relays_on()
+                elif self.relay_mode == 3:
+                    self.logging.info("Resuming relay auto mode after reconnect: {}".format(self.relay_state))
+                    self.set_relay_auto_mode(0, np.nonzero(self.relay_state)[0].tolist())
+
                 if self.get_HB_mode() != self.hb_mode:  # they don't match so must have been a reset
                     if self.hb_mode == Switchboard.MODE_AC:  # need to restart AC mode
                         self.set_HB_frequency(self.hb_freq)  # should resume counting cycles correctly
@@ -306,7 +313,7 @@ class Switchboard:
 
                 if res.startswith("["):  # info/warning/error
                     # TODO: log switchboard messages properly and raise flag in case of warnings
-                    self.logging.info("Message from Switchboard: {}".format(res))
+                    self.logging.debug("Message from Switchboard: {}".format(res))
 
                     res = self._read_hvps()  # read another line
                 elif res.startswith("Err"):
@@ -354,22 +361,26 @@ class Switchboard:
         return cast_float
 
     def _parse_relay_state(self, str_state):
+        if not str_state:
+            self.logging.warning("Failed to parse relay state. String is empty!")
+            return None, None  # return None to indicate something is wrong
+
         try:
             str_state = str_state.replace(":", ";")  # because v1 and v2 have different formats
             str_state = str_state.split(";")  # separate response for each relay
-            relay_mode = self._cast_int(str_state[0])  # is either the relay mode or just "Relay state" (-> -1)
-            # TODO: use/store relay mode somehow
+            mode = self._cast_int(str_state[0])  # is either the relay mode or just "Relay state" (-> -1)
+            # TODO: use relay mode to detect if switchboard was reset!
             state = str_state[1].split(",")  # split individual states
             state = [self._cast_int(r) for r in state if r]  # convert to int if string is not empty
         except Exception as ex:
             self.logging.warning("Failed to parse relay state: {}. Error: {}".format(str_state, ex))
-            return None  # return None to indicate something is wrong
+            return None, None  # return None to indicate something is wrong
 
         if len(state) == 6:  # output is only valid if there is a state for each relay
-            return state
+            return mode, state
         else:
             self.logging.warning("Invalid response. Received {} values instead of 6.".format(len(state)))
-            return None  # return None to indicate something is wrong
+            return None, None  # return None to indicate something is wrong
 
     ###########################################################################
     # getters and setters #####################################################
@@ -564,8 +575,9 @@ class Switchboard:
         if relays is None:
             self.logging.info("Set all relays on")
             self.relay_state = [1] * 6
+            self.relay_mode = 1
             res = self.send_query("SRelOn")
-            res = self._parse_relay_state(res) == self.relay_state  # check if all are on
+            res = self._parse_relay_state(res)[1] == self.relay_state  # check if all are on
         else:
             if self.firmware_version < 20:  # v1
                 res = True
@@ -587,8 +599,9 @@ class Switchboard:
         if relays is None:
             self.logging.info("Set all relays off")
             self.relay_state = [0] * 6
+            self.relay_mode = 0
             res = self.send_query("SRelOff")
-            res = self._parse_relay_state(res) == self.relay_state  # check if all are off
+            res = self._parse_relay_state(res)[1] == self.relay_state  # check if all are off
         else:
             if self.firmware_version < 20:  # v1
                 res = True
@@ -602,14 +615,15 @@ class Switchboard:
         return res
 
     def set_relay_state(self, relay, state):
+        """Only supported by v1!"""
         self.relay_state[relay] = state
         if state is 0:
             self.logging.debug("Setting relay {} off".format(relay))
-            res = self.send_query("SRelOff {:d}".format(relay))
+            self.send_query("SRelOff {:d}".format(relay))
         else:  # state is 1
             self.logging.debug("Setting relay {} on".format(relay))
-            res = self.send_query("SRelOn {:d}".format(relay))
-        res = self._parse_relay_state(res)
+            self.send_query("SRelOn {:d}".format(relay))
+        res = self.get_relay_state(from_buffer_if_available=False)
         return res[relay] == state
 
     def get_relay_state(self, from_buffer_if_available=True):
@@ -626,7 +640,16 @@ class Switchboard:
 
         self.logging.debug("Querying relay state")
         res = self._parse_relay_state(self.send_query("QRelState"))
-        return res
+        return res[1]
+
+    def get_relay_mode(self):
+        """
+        Queries the mode of the relais: 0 - all off; 1 - all on; 3 - auto mode
+        :return: The current mode of the relays (int in range [0 3])
+        """
+        self.logging.debug("Querying relay mode")
+        res = self._parse_relay_state(self.send_query("QRelState"))
+        return res[0]
 
     def set_relay_auto_mode(self, reset_time=0, relays=None):
         """
@@ -637,7 +660,7 @@ class Switchboard:
         :return: True, if the relay state was set successfully
         """
         if relays is None:
-            relays = range(6)  # all channels
+            relays = list(range(6))  # all channels
 
         rel_bin = [int(i in relays) for i in range(6)]  # get desired state (0/1) for each relay
         # compose string of which relays to switch on
@@ -645,10 +668,14 @@ class Switchboard:
         for rel in rel_bin:
             rel_str += str(rel)
         self.relay_state = rel_bin  # keep state in memory
+        self.relay_mode = 3
 
-        self.logging.info("Enabling auto mode with timeout {} s for channels {}".format(reset_time, rel_str))
-        res = self.send_query("SRelAuto {:.0f} {}".format(reset_time, rel_str))
-        return self._parse_relay_state(res) == rel_bin
+        msg = "Enabling auto mode with timeout {} s for channels {} (DEAs: {})".format(reset_time, rel_str, relays)
+        self.logging.info(msg)
+
+        self.send_query("SRelAuto {:.0f} {}".format(reset_time, rel_str))  # SRelAuto doesn't return a readable message
+        res = self.get_relay_state(False)
+        return res == rel_bin  # need to query relay state separately to see if it got set correctly
 
     def is_testing(self):
         """
@@ -994,7 +1021,20 @@ def test_switchboard():
     sb = Switchboard.detect(1)[0]
     sb.open()
     t_start = time.perf_counter()
+    sb.set_voltage(500)
+    sb.set_relay_auto_mode()
     time.sleep(1)
+    sb.set_relay_auto_mode(0, [0, 1, 2])
+    time.sleep(1)
+    sb.set_relay_auto_mode(0, [3, 4, 5])
+    time.sleep(1)
+    sb.set_relay_auto_mode(0, [0, 2, 4])
+    time.sleep(1)
+    sb.set_relays_on()
+    time.sleep(1)
+    sb.set_relays_off()
+    print(sb.get_current_voltage())
+    return
     sb.start_continuous_reading(reference_time=t_start, log_file="voltage log.csv", append=False)
     Vset = 450
     freq = 2

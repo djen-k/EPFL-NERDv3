@@ -106,8 +106,10 @@ class NERD:
         save_file_name = "{}/{} data.csv".format(dir_name, session_name)
         saver = DataSaver(self.active_deas, save_file_name)
 
-        # set up disconnection log
+        # set up disruption log
         fileHandler = logging.FileHandler("{}/{} disruptions.log".format(dir_name, session_name))
+        logFormatter = logging.Formatter("%(asctime)s [%(threadName)-12.12s] [%(levelname)-5.5s]  %(message)s")
+        fileHandler.setFormatter(logFormatter)
         logging.getLogger("Disruption").addHandler(fileHandler)
 
         # store strain reference ##########################################################
@@ -179,6 +181,7 @@ class NERD:
         now = time.perf_counter()
         time_started = now
         time_last_state_change = now
+        time_last_message = now
         time_last_image_saved = now
         time_last_measurement = now
         time_last_voltage_measurement = now
@@ -203,27 +206,32 @@ class NERD:
             # state machine: actions (actually just outputs since all the interesting stuff happens on state change)
             # ------------------------------
             dt_state_change = now - time_last_state_change  # time since last state change
+            dt_message = now - time_last_message
 
-            if current_state == STATE_STARTUP:
-                self.logging.info("Starting up state machine")
-            elif current_state == STATE_WAITING_LOW:
-                msg = "waiting low: {:.0f}/{}s".format(dt_state_change, duration_low_s)
-                self.logging.info(msg)
-            elif current_state == STATE_RAMP:
-                msg = "Step {}/{}, current voltage: {} V, next step in {:.0f}/{} s"
-                msg = msg.format(current_step, nsteps, current_target_voltage, dt_state_change, step_duration_s)
-                self.logging.info(msg)
-            elif current_state == STATE_WAITING_HIGH:
-                self.hvps.set_voltage(current_target_voltage)
-                msg = "Waiting high: {:.0f}/{} s".format(dt_state_change, duration_high_s)
-                if ac_mode:
-                    # check how many cycles have been completed
-                    cycles_completed = self.hvps.get_OC_cycles()
-                    msg += " ({:.0f} cycles)".format(cycles_completed)
-                self.logging.info(msg)
-            else:
-                logging.critical("Unknown state in the state machine")
-                raise Exception
+            if ac_mode:
+                # check how many cycles have been completed
+                cycles_completed = self.hvps.get_OC_cycles()
+
+            if dt_message > 1:  # write current state to log file every second
+                if current_state == STATE_STARTUP:
+                    self.logging.info("Starting up state machine")
+                elif current_state == STATE_WAITING_LOW:
+                    msg = "waiting low: {:.0f}/{}s".format(dt_state_change, duration_low_s)
+                    self.logging.info(msg)
+                elif current_state == STATE_RAMP:
+                    msg = "Step {}/{}, current voltage: {} V, next step in {:.0f}/{} s"
+                    msg = msg.format(current_step, nsteps, current_target_voltage, dt_state_change, step_duration_s)
+                    self.logging.info(msg)
+                elif current_state == STATE_WAITING_HIGH:
+                    self.hvps.set_voltage(current_target_voltage)
+                    msg = "Waiting high: {:.0f}/{} s".format(dt_state_change, duration_high_s)
+                    if ac_mode:
+                        msg += " ({:.0f} cycles)".format(cycles_completed)
+                    self.logging.info(msg)
+                else:
+                    logging.critical("Unknown state in the state machine")
+                    raise Exception
+                time_last_message = now
 
             # ------------------------------
             # state machine: transitions
@@ -327,9 +335,13 @@ class NERD:
             if breakdown_occurred:
                 # if all relays are off and more than one DEA "failed" at once, it's probably due to a reset
                 # TODO: fix this so we don't get stuck here at the end of a test if multiple DEAs failed at once
+
                 if dea_state_el_new.count(0) == 6 and len(failed_deas) > 1:
                     # TODO: re-enable only channels that haven't already failed
-                    self.hvps.set_relay_auto_mode(0, self.active_deas)  # must have been reset. re-enable auto mode
+                    msg = "All relays are disabled - presumable due to a reset. DEAs will be reconnected: {}"
+                    self.logging.info(msg.format(failed_deas))
+                    # must have been reset. re-enable auto mode
+                    self.hvps.set_relay_auto_mode(reset_time=0, relays=self.active_deas)
                     continue
 
                 self.logging.info("Breakdown detected! DEAs: {}".format(failed_deas))
