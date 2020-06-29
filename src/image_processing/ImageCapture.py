@@ -131,7 +131,7 @@ class ImageCapture:
         # image capture settings
         self.desired_resolution = [1920, 1080]
         self.auto_reconnect = True
-        self.max_reconnect_attempts = 3
+        self.max_reconnect_attempts = 50
         self.max_fps = 0  # unlimited
 
         # internal variables
@@ -276,6 +276,7 @@ class ImageCapture:
 
         if parallel is True:
             cams_found = {}
+            max_index = 0
             # Use executor in with statement to ensure threads are cleaned up promptly
             with futures.ThreadPoolExecutor(max_workers=n_expected) as executor:
                 # Start the load operations and mark each future with its index
@@ -292,10 +293,12 @@ class ImageCapture:
                     if cam is not None:  # either no camera found at this index or some error occurred
                         self.logging.debug('Camera {} is running'.format(index))
                         cams_found[index] = cam
+                        max_index = max(max_index, index)
 
-            cams_list = [None] * len(cams_found)
-            for index, cam in cams_found.items():
-                cams_list[index] = cam
+            cams_list = []
+            for i in range(max_index+1):
+                if i in cams_found.keys():
+                    cams_list.append(cams_found[i])
         else:  # don't use threading
             self.logging.debug("Sequential camera detection (no multi-threading)")
             cams_list = []
