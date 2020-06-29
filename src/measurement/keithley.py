@@ -165,6 +165,10 @@ class DAQ6510:
         :return: True if the instrument was successfully reconnected, or False if after the specified number of attempts
         reconnection was not successful.
         """
+        msg = "Multimeter lost connection"
+        self.logging.info(msg)
+        logging.getLogger("Disruption").info(msg)  # log to separate disruption log file
+
         attempts_performed = 0
         inst_id = self.instrument_id  # remember current instrument ID so we can reconnect to the same one
         while attempts < 0 or attempts_performed < attempts:
@@ -174,7 +178,9 @@ class DAQ6510:
                 self.disconnect()
                 connected = self.connect(inst_id, reset=False)
                 if connected:
-                    self.logging.debug("Reconnection successful.")
+                    msg = "Multimeter reconnected successfuly after {} attempts.".format(attempts)
+                    self.logging.info(msg)
+                    logging.getLogger("Disruption").info(msg)  # log to separate disruption log file
                     return True
                 else:
                     self.logging.debug("Reconnection attempt failed.")

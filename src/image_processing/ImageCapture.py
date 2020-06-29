@@ -347,54 +347,10 @@ class ImageCapture:
             cam.release()
             return None
 
-    def __find_cameras(self):
-        """
-        Opens all available image capture devices and stores a handle to each device as well as a list of device names
-        (currently just "Camera [index]"). One initial image from each camera is retrieved and stored in the buffer.
-        This method can be used to re-initialize the cameras.
-        :return: A list of the available cameras
-        """
-
-        self._reset()  # release all cams and empty buffers
-
-        i = -1
-        while True:
-            # open all cameras starting at index 0
-            i += 1  # increase index to try next camera
-            # if camera was already open, it will be closed and re-opened internally
-            cam = Camera(i, self.desired_resolution, self._new_image_callback)
-
-            if not cam.isOpened():  # a camera with this index doesn't exist or it is in use
-                break  # if not expecting any more or tried at least the expected number of cams, stop search.
-            else:
-                self.logging.info("{} opened".format(cam.name))
-                success, frame = cam.read()  # check if we can read an image
-                if success:
-                    # store camera handle, name, and captured image
-                    self._cameras.append(cam)
-
-                else:
-                    self.logging.warning("Unable to retrieve image from {}. Camera will be closed.".format(cam.name))
-                    cam.release()
-
-        self._cameras_available = self._cameras  # store list of all available cameras.
-
-        self._camera_count = len(self._cameras)
-        self._camera_names = self._get_names_from_cameras()
-
-        self.logging.info("{} cameras found".format(self._camera_count))
-
-        # discard the first few sets of images. They tend to be rubbish
-        for i in range(10):
-            time.sleep(0.1)
-            self.grab_images()  # no need to retrieve, we just want the cameras to get warmed up (adjust exposure, etc.)
-
-        # call new set callback since the first full set of images is now available
-        if self.new_set_callback is not None:
-            self.new_set_callback(self.get_images_from_buffer(), self.get_timestamps())
-
     def reconnect_cameras(self):
-        self.logging.info("attempting to reconnect cameras")
+        msg = "Cameras lost connection"
+        self.logging.info(msg)
+        logging.getLogger("Disruption").info(msg)
 
         if not self.auto_reconnect:
             self.logging.critical("Connection to cameras lost and auto reconnect is disabled. Shutting down...")
@@ -420,7 +376,10 @@ class ImageCapture:
             cams_failed = state.count(False)
 
             if cams_lost is 0:
-                self.logging.info("Cameras successfully reconnected")
+                msg = "Cameras successfully reconnected after {} attempts".format(self._reconnect_attempt)
+                self.logging.info(msg)
+                logging.getLogger("Disruption").info(msg)  # also log to separate disruption log file
+
                 if prev_selection is not None:
                     self.select_cameras(prev_selection)
                     self.set_camera_names(prev_names)

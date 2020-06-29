@@ -89,8 +89,7 @@ class NERD:
         self.shutdown_flag = False
 
     def run_nogui(self):
-        self.logging.info("Running NERD protocol with {} DEAs in main thread without dedicated GUI "
-                          "(using openCV windows for visual output".format(self.n_dea))
+        self.logging.info("Running NERD protocol with {} DEAs: {}".format(self.n_dea, self.active_deas))
 
         # set up output folder and image and data saver ################################################
 
@@ -106,6 +105,10 @@ class NERD:
         # TODO: handle varying numbers of DEAs
         save_file_name = "{}/{} data.csv".format(dir_name, session_name)
         saver = DataSaver(self.active_deas, save_file_name)
+
+        # set up disconnection log
+        fileHandler = logging.FileHandler("{}/{} disruptions.log".format(dir_name, session_name))
+        logging.getLogger("Disruption").addHandler(fileHandler)
 
         # store strain reference ##########################################################
 
@@ -571,7 +574,7 @@ class NERD:
 
 
 if __name__ == '__main__':
-    duallog.setup("logs", minlevelConsole=logging.DEBUG, minLevelFile=logging.DEBUG)
+    duallog.setup("logs", minlevelConsole=logging.INFO, minLevelFile=logging.INFO)
     logging.info("Started application")
 
     # launch Qt

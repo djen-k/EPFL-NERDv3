@@ -5,8 +5,8 @@ from collections import deque
 from datetime import datetime
 from sys import stdout
 from threading import Thread, Event, Lock, RLock
-import numpy as np
 
+import numpy as np
 import serial
 import serial.tools.list_ports
 
@@ -208,6 +208,10 @@ class Switchboard:
 
     def dirty_reconnect(self):
 
+        msg = "Switchboard lost connection"
+        self.logging.info(msg)
+        logging.getLogger("Disruption").info(msg)  # log to separate disruption log file
+
         # update the number of cycles if we're in AC mode (this doesn't use serial communication)
         self.get_OC_cycles()
         self.get_HB_cycles()
@@ -220,6 +224,7 @@ class Switchboard:
 
                 # resume operation by restoring the previous state
                 self.set_voltage(self.vset)
+                self.logging.info("Resetting switchboard state after reconnect")
                 self.set_relay_auto_mode(0, self.relay_state)
                 if self.get_HB_mode() != self.hb_mode:  # they don't match so must have been a reset
                     if self.hb_mode == Switchboard.MODE_AC:  # need to restart AC mode
@@ -250,7 +255,10 @@ class Switchboard:
                     self.close()
                     return
 
-        self.logging.critical("Reconnected!")
+        elapsed = time.perf_counter() - start
+        msg = "Switchboard reconnected after {:.1f} s!".format(elapsed)
+        self.logging.info(msg)
+        logging.getLogger("Disruption").info(msg)  # also log to separate disruption log file
 
     ###########################################################################
     # communication ###########################################################
@@ -554,7 +562,7 @@ class Switchboard:
         :return: The the updated relay state returned by the switchboard
         """
         if relays is None:
-            self.logging.debug("Set all relays on")
+            self.logging.info("Set all relays on")
             self.relay_state = [1] * 6
             res = self.send_query("SRelOn")
             res = self._parse_relay_state(res) == self.relay_state  # check if all are on
@@ -577,7 +585,7 @@ class Switchboard:
         :return: True, if the relay state was set successfully
         """
         if relays is None:
-            self.logging.debug("Set all relays off")
+            self.logging.info("Set all relays off")
             self.relay_state = [0] * 6
             res = self.send_query("SRelOff")
             res = self._parse_relay_state(res) == self.relay_state  # check if all are off
@@ -638,7 +646,7 @@ class Switchboard:
             rel_str += str(rel)
         self.relay_state = rel_bin  # keep state in memory
 
-        self.logging.debug("Enabling auto mode with timeout {} s for channels {}".format(reset_time, rel_str))
+        self.logging.info("Enabling auto mode with timeout {} s for channels {}".format(reset_time, rel_str))
         res = self.send_query("SRelAuto {:.0f} {}".format(reset_time, rel_str))
         return self._parse_relay_state(res) == rel_bin
 
@@ -840,7 +848,7 @@ class Switchboard:
             self.logging.info("Voltage reading thread is already running.")
             return
 
-        self.logging.debug("Starting voltage reading thread")
+        self.logging.info("Starting voltage reading thread")
 
         if log_file is not None:
             self.logging.debug("Setting up log file: {}".format(log_file))
@@ -882,7 +890,7 @@ class Switchboard:
     def _continuous_voltage_reading(self):
         """Method for continuous reading"""
 
-        # self.logging.debug("HVPS logger thread started")
+        self.logging.info("HVPS logger thread started")
         log_to_file = self.log_file is not None  # this won't change so we don't need to check on every loop
         # self.logging.debug("Saving to file: {}".format(log_to_file))
 
@@ -921,7 +929,7 @@ class Switchboard:
                     self.log_writer.writerow(row)
                     # self.logging.debug("Logger thread: Data written to file".format(len(self.voltage_buf)))
 
-        # self.logging.debug("Logger thread exiting")
+        self.logging.info("Logger thread exiting")
         # close log file when we're done
         if log_to_file:
             with self.log_lock:
