@@ -385,9 +385,11 @@ class DAQ6510:
                 return None
             time.sleep(0.1)
             res = self.send_query("TRACe:ACTual?")
-            if res is None:
-                continue
-            i = int(res)
+            try:
+                i = int(res)
+            except Exception as ex:
+                self.logging.warning("Failed to parse response from multimeter: {} (Error: {})".format(res, ex))
+
             elapsed = time.perf_counter() - start
 
         data = self.query_data("TRACe:DATA? 1, {}, \"defbuffer1\", READ".format(i))

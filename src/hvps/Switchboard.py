@@ -554,7 +554,7 @@ class Switchboard:
     def set_pid_gains(self, gains):
         """
         Set the PID gains of the internal voltage regulator. The new gains will be written to the EEPROM (only if new
-        gains are different from the prvious ones).
+        gains are different from the previous ones).
         :param gains: A list of gain values [P, I, D]
         :return: True if the PID gains have been set correctly
         """
