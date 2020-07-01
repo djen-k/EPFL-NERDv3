@@ -19,6 +19,7 @@ If run, this module illustrates the usage of the duallog package.
 import datetime
 import logging.handlers
 import os
+import sys
 
 
 def setup(logdir='log', logname='log', minlevelConsole=logging.WARNING, minLevelFile=logging.DEBUG, lformat=None):
@@ -79,7 +80,7 @@ def setup(logdir='log', logname='log', minlevelConsole=logging.WARNING, minLevel
     logger.addHandler(filehandler)
 
     # Set up logging to the console.
-    streamhandler = logging.StreamHandler()
+    streamhandler = logging.StreamHandler(stream=sys.stdout)
     streamhandler.setLevel(minlevelConsole)
     streamformatter = logging.Formatter('%(levelname)-8s \t%(name)-25s \t%(message)s')
     streamhandler.setFormatter(streamformatter)

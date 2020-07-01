@@ -20,7 +20,7 @@ def read_config(fname):
         key = line[0].strip()  # strip to remove any whitespace
         val = line[1].strip()
 
-        if key == "cam_order":
+        if key == "cam_order" or key == "active_DEAs":
             val = val[1: -1]
             val = [int(s) for s in val.split(", ")]
         elif val == "True":

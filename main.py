@@ -54,11 +54,25 @@ class NERD:
     def __init__(self, config, strain_detector=None):
         self.logging = logging.getLogger("NERD")
         self.config = config
+
         self.image_cap = ImageCapture.SharedInstance
+
         # TODO: implement robust system for dealing with unexpected number of images etc.
         # to get active DEAs, turn all -1 (=disabled) in cam order to 0, then find non-zeros (returns a tuple of arrays)
-        self.active_deas = np.nonzero(np.array(config["cam_order"]) + 1)[0].tolist()
-        self.n_dea = len(self.active_deas)
+        if "active_DEAs" in config:
+            active_deas = config["active_DEAs"]
+        else:
+            active_deas = [1] * 6
+
+        if "cam_order" in config:
+            cam_order = config["cam_order"]
+            # find the DEAs that have a camera assigned and are enabled
+            active_deas = (np.array(active_deas) == 1) & (np.array(cam_order) > -1)
+            # convert to list of indices
+            active_deas = np.nonzero(active_deas)[0].tolist()
+
+        self.active_deas = active_deas
+        self.n_dea = len(active_deas)
         self.strain_detector = strain_detector
 
         # connect to HVPS
@@ -97,7 +111,7 @@ class NERD:
         session_name = "NERD test {}".format(now_tstamp.strftime("%Y%m%d-%H%M%S"))
         dir_name = "output/{}".format(session_name)
 
-        cap = ImageCapture.SharedInstance  # get image capture
+        cap = self.image_cap  # get image capture
 
         # create an image saver for this session to store the recorded images
         imsaver = ImageSaver(dir_name, self.active_deas, save_result_images=True)

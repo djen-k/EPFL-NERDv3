@@ -4,6 +4,7 @@ import os
 import time
 
 import cv2
+import numpy as np
 from PyQt5 import QtWidgets, QtGui
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QApplication
@@ -41,6 +42,8 @@ class SetupDialog(QtWidgets.QDialog):
         img_size = [1920, 1080]
         self._preview_img_size = Screen.get_max_size_on_screen(img_size, (2, 3), (100, 800))
         self._adjustment_view_size = Screen.get_max_size_on_screen(img_size, margin=(20, 100))
+
+        self.selection_view_mouse_click = None
 
         # register callback
         # image_capture.set_new_image_callback(self.updateImage)
@@ -189,7 +192,9 @@ class SetupDialog(QtWidgets.QDialog):
         gridLay = QtWidgets.QGridLayout()
         self.lbl_image = []
         self.cbb_camera_select = []
+        self.chk_active_DEA = []
         self.btn_adjust = []
+        self.btn_select = []
         for i in range(n_deas):
             groupBox = QtWidgets.QGroupBox("DEA {}".format(i + 1), self)  # number groups/DEAs from 1 to 6
             grpLay = QtWidgets.QVBoxLayout()
@@ -201,11 +206,25 @@ class SetupDialog(QtWidgets.QDialog):
             self.lbl_image.append(lbl)
 
             # add a camera  selection Combobox and fill the with camera names
-            cb = QtWidgets.QComboBox()
-            cb.addItem("Not used")
+            cbb = QtWidgets.QComboBox()
+            cbb.addItem("Not available")
             # cb.setCurrentIndex(0)
-            cb.currentIndexChanged.connect(self.camSelIndexChanged)
-            self.cbb_camera_select.append(cb)
+            cbb.currentIndexChanged.connect(self.camSelIndexChanged)
+            self.cbb_camera_select.append(cbb)
+
+            # add a checkbox to enable or disable each sample
+            chk = QtWidgets.QCheckBox("Active")
+            chk.clicked.connect(self.refreshImages)
+            if "active_DEAs" in self._defaults:
+                chk.setChecked(self._defaults["active_DEAs"][i] == 1)
+            else:
+                chk.setChecked(True)
+            self.chk_active_DEA.append(chk)
+
+            # add adjust button
+            btnSel = QtWidgets.QPushButton("Select...")
+            btnSel.clicked.connect(self.btnSelectClicked)
+            self.btn_select.append(btnSel)
 
             # add adjust button
             btn = QtWidgets.QPushButton("Adjust...")
@@ -213,8 +232,11 @@ class SetupDialog(QtWidgets.QDialog):
             self.btn_adjust.append(btn)
 
             rowLay = QtWidgets.QHBoxLayout()
-            rowLay.addWidget(cb)
-            rowLay.addWidget(btn, alignment=Qt.AlignRight)
+            rowLay.addWidget(chk, 0, alignment=Qt.AlignLeft)
+            rowLay.addWidget(cbb, 0, alignment=Qt.AlignLeft)
+            rowLay.addWidget(btnSel, 0, alignment=Qt.AlignLeft)
+            rowLay.addWidget(btn, 1, alignment=Qt.AlignLeft)
+            # rowLay.addSpacerItem(QtWidgets.QSpacerItem(1, 1, hPol`icy=Qt.MaximumSize))
 
             # add image and combobox to group box layout
             grpLay.addLayout(rowLay)
@@ -491,19 +513,34 @@ class SetupDialog(QtWidgets.QDialog):
                 self.lbl_daq_status.setText("Connection failed!")
 
     def btnAdjustClicked(self):
-        self.logging.debug("clicked adjust")
         sender = self.sender()
         for i_dea in range(self._n_deas):
             if sender == self.btn_adjust[i_dea]:
-                self.logging.debug("sender: button for DEA {}".format(i_dea))
+                self.logging.debug("Clicked adjust button for DEA {}".format(i_dea))
                 self.showAdjustmentView(i_dea)
                 self.btnCaptureClicked()
+                return
+
+    def btnSelectClicked(self):
+        sender = self.sender()
+        for i_dea in range(self._n_deas):
+            if sender == self.btn_select[i_dea]:
+                self.logging.debug("Clicked select button for DEA {}".format(i_dea))
+                selection = self.showSelectionView(i_dea)
+                if selection is not None:
+                    self.cbb_camera_select[i_dea].setCurrentIndex(selection + 1)  # first item is "not used"
+                    self.chk_active_DEA[i_dea].setChecked(True)
+                    self.chk_active_DEA[i_dea].setEnabled(True)
+
+                self.btnCaptureClicked()
+                return
 
     def record_strain_reference(self):
         # protect against impatient clicks
         self.btn_reference.setFixedSize(self.btn_reference.size())
         self.btn_reference.setText("Busy...")
         self.btn_reference.setEnabled(False)
+
         QApplication.processEvents()
 
         cap = self._image_capture
@@ -562,13 +599,13 @@ class SetupDialog(QtWidgets.QDialog):
             try:
                 if self.btn_apply_voltage.isChecked():
                     # turn on and set voltage
-                    self._hvps.set_switching_mode(1)  # set to DC mode
-                    self._hvps.set_relay_auto_mode()
+                    self._hvps.set_output_on()  # set to DC mode
                     self._hvps.set_voltage_no_overshoot(self.num_voltage.value())
+                    self._hvps.set_relay_auto_mode()
                     self.btn_apply_voltage.setText("Turn voltage off!")
                     self.btn_apply_voltage.setStyleSheet("QPushButton{ color: red }")
                 else:
-                    self._hvps.set_switching_mode(0)
+                    self._hvps.set_output_off()
                     self._hvps.set_voltage(0, block_until_reached=True)
                     self._hvps.set_relays_off()
                     self.btn_apply_voltage.setText("Apply voltage now!")
@@ -604,12 +641,77 @@ class SetupDialog(QtWidgets.QDialog):
 
         cv2.destroyAllWindows()
 
+    def selection_view_mouse_clicked(self, event, x, y, flags, param):
+        if event == cv2.EVENT_LBUTTONUP:
+            self.selection_view_mouse_click = (x, y)
+
+    def showSelectionView(self, i_dea):
+        selection = None
+        try:
+            nr = int(round(np.sqrt(self.n_cams)))
+            nc = int(np.ceil(np.sqrt(self.n_cams)))
+            img_shape = self._image_capture.read_single_image(0).shape
+            img_size = (img_shape[1], img_shape[0])  # convert array shape (rows, cols, c), to img size (width, height)
+            sel_img_size = Screen.get_max_size_on_screen(img_size, (nr, nc), (40, 100))
+            sel_img_shape = (sel_img_size[1], sel_img_size[0], 3)
+
+            wname = "Click image of DEA {} (press ESC to exit)".format(i_dea + 1)
+            cv2.namedWindow(wname)
+            cv2.setMouseCallback(wname, self.selection_view_mouse_clicked)
+            self.selection_view_mouse_click = None
+            key = 0
+            while key != 27:  # loop until ESC is pressed (or a mouse click detected)
+                imgs = self._image_capture.read_images()
+                i = -1
+                montage = None
+                indices = np.zeros((nr, nc), dtype=np.int)  # grid of camera indices to pick the right one easily later
+                indices -= 1  # make all indices -1 initially, then we fill in the proper value in the loop
+                for r in range(nr):
+                    montage_row = None
+                    for c in range(nc):
+                        i += 1
+
+                        if i < self.n_cams:
+                            indices[r, c] = i
+                            img = cv2.resize(imgs[i], sel_img_size)
+                        else:
+                            img = np.zeros(sel_img_shape, dtype=np.uint8)
+
+                        if montage_row is None:
+                            montage_row = img
+                        else:
+                            montage_row = np.hstack((montage_row, img))
+                    if montage is None:
+                        montage = montage_row
+                    else:
+                        montage = np.vstack((montage, montage_row))
+
+                cv2.imshow(wname, montage)
+                key = cv2.waitKey(100)
+                # self.logging.debug("Key pressed {}".format(ret))
+                if self.selection_view_mouse_click is not None:
+                    x, y = self.selection_view_mouse_click
+                    c = int(np.floor(x / sel_img_size[0]))
+                    r = int(np.floor(y / sel_img_size[1]))
+
+                    selection = int(indices[r, c])
+                    if selection >= 0:
+                        cam_name = self._image_capture.get_camera(selection).name
+                        self.logging.debug("Selected {} for DEA {}.".format(cam_name, i_dea + 1))
+                        self.selection_view_mouse_click = None
+                        break
+        except Exception as ex:
+            self.logging.error("Exception in showAdjustmentView: {}".format(ex))
+
+        cv2.destroyAllWindows()
+        return selection
+
     def camSelIndexChanged(self):
         if self._startup:
             return
 
         try:
-            # see if any other combobox has the same selected index
+            # get new selected index and previous index
             sender = self.sender()
             i_sender = self.cbb_camera_select.index(sender)
             sender = self.cbb_camera_select[i_sender]
@@ -617,10 +719,15 @@ class SetupDialog(QtWidgets.QDialog):
             prev_idx = self._camorder[i_sender] + 1
 
             # self.logging.debug("camera selection index for DEA {} changed to {}".format(src, idx))
-            if idx_cam > 0:  # if it's 0 ("not used"), we don't need to do anything
+            if idx_cam > 0:  # valid camera selected
+                self.chk_active_DEA[i_sender].setEnabled(True)
+                # check if another slot is using this camera (and swap if so)
                 for cb in self.cbb_camera_select:
                     if cb is not sender and cb.currentIndex() == idx_cam:
                         cb.setCurrentIndex(prev_idx)  # set to the previous selection of the sender
+            else:  # "not used"
+                self.chk_active_DEA[i_sender].setChecked(False)
+                self.chk_active_DEA[i_sender].setEnabled(False)
             self._camorder = self.getCamOrder()  # update stored cam order
 
             # disable strain display because if the camera selection changes, the strain reference is no longer valid
@@ -672,6 +779,11 @@ class SetupDialog(QtWidgets.QDialog):
             # img_size = self._default_img_size
             img_size = (label.size().width(), label.size().height())
 
+        if not self.chk_active_DEA[i_dea].isChecked():
+            gray_img = opencv_image.copy()
+            gray_img[:] = 127
+            opencv_image = cv2.addWeighted(opencv_image, 0.35, gray_img, 0.65, 0.0)
+
         label.setPixmap(QtImageTools.conv_Qt(opencv_image, img_size))
         self.logging.debug("Set new image for DEA {}".format(i_dea + 1))
         self.repaint()
@@ -694,6 +806,9 @@ class SetupDialog(QtWidgets.QDialog):
     def getCamOrder(self):
         return [cb.currentIndex() - 1 for cb in self.cbb_camera_select]
 
+    def getActiveSamples(self):
+        return [int(chb.isChecked()) for chb in self.chk_active_DEA]  # save active state as 0 or 1
+
     def get_results(self):
         """
         Get sonfiguration for the NERD test as set in the SetupDialog
@@ -707,6 +822,7 @@ class SetupDialog(QtWidgets.QDialog):
             "com_port": sb_id,
             "daq_id": daq_id,
             "cam_order": self.getCamOrder(),
+            "active_DEAs": self.getActiveSamples(),
             "voltage": self.num_voltage.value(),
             "steps": self.num_steps.value(),
             "step_duration_s": self.num_step_duration.value(),
