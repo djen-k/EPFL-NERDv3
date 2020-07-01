@@ -55,8 +55,6 @@ class NERD:
         self.logging = logging.getLogger("NERD")
         self.config = config
 
-        self.image_cap = ImageCapture.SharedInstance
-
         # TODO: implement robust system for dealing with unexpected number of images etc.
         # to get active DEAs, turn all -1 (=disabled) in cam order to 0, then find non-zeros (returns a tuple of arrays)
         if "active_DEAs" in config:
@@ -65,15 +63,27 @@ class NERD:
             active_deas = [1] * 6
 
         if "cam_order" in config:
-            cam_order = config["cam_order"]
+            active_deas = np.array(active_deas) == 1  # convert to logical numpy array
+            cam_order = np.array(config["cam_order"], dtype=int)
+            cam_order[~active_deas] = -1  # de-select cameras of disabled samples
             # find the DEAs that have a camera assigned and are enabled
-            active_deas = (np.array(active_deas) == 1) & (np.array(cam_order) > -1)
+            active_deas = cam_order > -1  # derive from cam order so any slot that doesn't have a cam is disabled
             # convert to list of indices
-            active_deas = np.nonzero(active_deas)[0].tolist()
+            cam_order = cam_order.tolist()  # convert to list, just to be sure the ImageCapture can handle it
+        else:
+            cam_order = list(range(6))  # no order specified -> use default order
 
-        self.active_deas = active_deas
-        self.n_dea = len(active_deas)
+        self.active_deas = active_deas  # boolean numpy array
+        self.active_dea_indices = np.nonzero(active_deas)[0].tolist()
+        self.n_deas = len(self.active_dea_indices)
+        self.cam_order = cam_order
+
+        # apply cam order to image capture so the indices of DEAs and cameras match
+        self.image_cap = ImageCapture.SharedInstance
+        self.image_cap.select_cameras(cam_order)
+
         self.strain_detector = strain_detector
+        # we don't apply sample selection to strain detector here because we want to save all reference images first
 
         # connect to HVPS
         try:
@@ -103,7 +113,7 @@ class NERD:
         self.shutdown_flag = False
 
     def run_nogui(self):
-        self.logging.info("Running NERD protocol with {} DEAs: {}".format(self.n_dea, self.active_deas))
+        self.logging.info("Running NERD protocol with {} DEAs: {}".format(self.n_deas, self.active_dea_indices))
 
         # set up output folder and image and data saver ################################################
 
@@ -114,11 +124,11 @@ class NERD:
         cap = self.image_cap  # get image capture
 
         # create an image saver for this session to store the recorded images
-        imsaver = ImageSaver(dir_name, self.active_deas, save_result_images=True)
+        imsaver = ImageSaver(dir_name, self.active_dea_indices, save_result_images=True)
 
         # TODO: handle varying numbers of DEAs
         save_file_name = "{}/{} data.csv".format(dir_name, session_name)
-        saver = DataSaver(self.active_deas, save_file_name)
+        saver = DataSaver(self.active_dea_indices, save_file_name)
 
         # set up disruption log
         fileHandler = logging.FileHandler("{}/{} disruptions.log".format(dir_name, session_name))
@@ -136,6 +146,9 @@ class NERD:
 
         ref_imgs, ref_res_imgs = self.strain_detector.get_reference_images()
         imsaver.save_all(ref_imgs, now_tstamp, ref_res_imgs, suffix="reference")
+        ref_selection = self.active_deas[np.array(self.cam_order) > -1]
+        ref_selection = np.nonzero(ref_selection)[0].tolist()
+        self.strain_detector.select_reference(ref_selection)
 
         time.sleep(1)  # just wait a second so the timestamp for the first image is not the same as the reference
 
@@ -208,7 +221,7 @@ class NERD:
 
         self.hvps.set_HB_mode(1)
         # enable relay auto mode for selected channels
-        self.hvps.set_relay_auto_mode(reset_time=0, relays=self.active_deas)
+        self.hvps.set_relay_auto_mode(reset_time=0, relays=self.active_dea_indices)
         hvps_log_file = "{}/{} hvps log.csv".format(dir_name, session_name)
         self.hvps.start_continuous_reading(buffer_length=1, log_file=hvps_log_file)
 
@@ -355,7 +368,7 @@ class NERD:
                     msg = "All relays are disabled - presumable due to a reset. DEAs will be reconnected: {}"
                     self.logging.info(msg.format(failed_deas))
                     # must have been reset. re-enable auto mode
-                    self.hvps.set_relay_auto_mode(reset_time=0, relays=self.active_deas)
+                    self.hvps.set_relay_auto_mode(reset_time=0, relays=self.active_dea_indices)
                     continue
 
                 self.logging.info("Breakdown detected! DEAs: {}".format(failed_deas))
@@ -441,7 +454,7 @@ class NERD:
                 if self.daq is not None:  # perform electrical measurements if possible
 
                     # measure resistance
-                    Rdea = self.daq.measure_DEA_resistance(self.active_deas, n_measurements=1, nplc=1)  # 1-D np array
+                    Rdea = self.daq.measure_DEA_resistance(self.active_dea_indices, n_measurements=1, nplc=1)  # 1-D np array
                     if Rdea is not None:
                         self.logging.info("Resistance [kΩ]: {}".format(Rdea / 1000))
                     else:
@@ -480,7 +493,7 @@ class NERD:
                     R_kohm = np.round(Rdea / 100) / 10  # convert to kOhm with one decimal place
                     res_img_labels = [label + "  {}kOhm".format(r) for r in R_kohm]
                 else:
-                    res_img_labels = [label] * self.n_dea
+                    res_img_labels = [label] * self.n_deas
 
                 # retrieve the images that were grabbed earlier
                 imgs = cap.retrieve_images()[1]  # get only the images, not the success flags
@@ -493,7 +506,7 @@ class NERD:
                 if 0 in dea_state_vis:  # 0 means outlier, 1 means OK
                     self.logging.warning("Outlier detected")
 
-                dea_state_el_selection = [dea_state_el[i] for i in self.active_deas]
+                dea_state_el_selection = [dea_state_el[i] for i in self.active_dea_indices]
                 for img, v, e in zip(res_imgs, dea_state_vis, dea_state_el_selection):
                     StrainDetection.draw_state_visualization(img, v, e)
 
@@ -608,9 +621,6 @@ if __name__ == '__main__':
 
     # run setup
     _config, _strain_detector = _setup()
-    # apply cam order to image capture so we can just address them as cam 0, 1, 2, ...
-    ImageCapture.SharedInstance.select_cameras(_config["cam_order"])
-
     nerd = NERD(_config, _strain_detector)
     nerd.run_nogui()
 

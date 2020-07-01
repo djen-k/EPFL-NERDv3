@@ -44,6 +44,14 @@ class StrainDetector:
     def get_reference_images(self):
         return self._reference_images, self._reference_result_images
 
+    def select_reference(self, selection):
+        self._reference_images = [self._reference_images[i] for i in selection]
+        self._reference_result_images = [self._reference_result_images[i] for i in selection]
+        self._reference_ellipses = [self._reference_ellipses[i] for i in selection]
+        self._reference_centers = self._reference_centers[selection, :]
+        self._reference_radii = self._reference_radii[selection, :]
+        self._reference_pseudo_areas = self._reference_pseudo_areas[selection]
+
     def has_reference(self):
         return self._reference_images is not None
 
