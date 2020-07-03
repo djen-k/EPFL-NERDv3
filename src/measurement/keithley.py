@@ -401,28 +401,32 @@ class DAQ6510:
 
         # check the source voltage
         Vsource = data[:, 0]
-        if np.any(Vsource < 9) or np.any(Vsource > 10):
-            msg = "Source voltage for resistance measurement is outside the expected range: {}V".format(Vsource)
-            self.logging.warning(msg)
-        else:
-            self.logging.debug("Source voltage for resistance measurement is {}V".format(Vsource))
-
         data = data[:, 1:]  # don't need the reference voltage anymore
-
         data = np.reshape(data, (n_measurements, n_deas, 2))
         Vshunt = data[:, :, 0]
         VDEA = data[:, :, 1]
         Rshunt = 100000  # 100kOhm  TODO: read in real calibration data
 
+        Vshunt[Vshunt < 0.1] = np.nan
+        VDEA[VDEA < 0.1] = np.nan
+
         Ishunt = Vshunt / Rshunt
         RDEA = VDEA / Ishunt
 
+        self.logging.debug("Voltage across shunt: {} V".format(np.array2string(Vshunt, precision=3)))
         self.logging.debug("Applied current: {} µA".format(np.array2string(Ishunt * 1000000, precision=2)))
         self.logging.debug("Voltage across electrode: {} V".format(np.array2string(VDEA, precision=3)))
         self.logging.debug("Electrode resistance: {} kΩ".format(np.array2string(RDEA / 1000, precision=3)))
 
         RDEA = np.mean(RDEA, axis=0)  # take avg even for single measurement to reduce to 1-D array
         self.logging.debug("Average resistance: {} kΩ".format(np.array2string(RDEA / 1000, precision=3)))
+
+        if np.any(Vsource < 9) or np.any(Vsource > 10):
+            msg = "Source voltage for resistance measurement is outside the expected range: {}V".format(Vsource)
+            self.logging.warning(msg)
+            RDEA[:] = np.nan  # to make it obvious something is wrong
+        else:
+            self.logging.debug("Source voltage for resistance measurement is {}V".format(Vsource))
 
         return RDEA
 
