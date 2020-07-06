@@ -449,7 +449,7 @@ class Switchboard:
         if not block_until_reached:  # don't wait, return immediately
             return res == voltage
 
-        timeout = 5  # if voltage has not reached its set point in 5 s, something must be wrong!
+        timeout = 30  # if voltage has not reached its set point in 30 s, something is definitely wrong!
         start = time.perf_counter()
         elapsed = 0
         while abs(voltage - self.get_current_voltage()) > 50:

@@ -156,7 +156,7 @@ class DAQ6510:
     def is_connected(self):
         return self.instrument is not None
 
-    def reconnect(self, attempts=-1):
+    def reconnect(self, attempts=3):
         """
         Try to reconnect to the instrument by disconnecting and connecting again to the same device. If unseccessful,
         reconnection will be attempted for the specified number of times before aborting the effort.
@@ -171,14 +171,14 @@ class DAQ6510:
 
         attempts_performed = 0
         inst_id = self.instrument_id  # remember current instrument ID so we can reconnect to the same one
-        while attempts < 0 or attempts_performed < attempts:
+        while True:  # keep trying to reconnect
             attempts_performed += 1
             self.logging.debug("Trying to reconnect instrument...  (attempt {})".format(attempts_performed))
             try:
                 self.disconnect()
                 connected = self.connect(inst_id, reset=False)
                 if connected:
-                    msg = "Multimeter reconnected successfuly after {} attempts.".format(attempts)
+                    msg = "Multimeter reconnected successfuly after {} attempts.".format(attempts_performed)
                     self.logging.info(msg)
                     logging.getLogger("Disruption").info(msg)  # log to separate disruption log file
                     return True
@@ -186,7 +186,11 @@ class DAQ6510:
                     self.logging.debug("Reconnection attempt failed.")
             except Exception as ex:
                 self.logging.debug("Reconnection attempt failed: {}".format(ex))
-            time.sleep(0.1)
+
+            if attempts < 0 or attempts_performed < attempts:  # check if we should keep trying
+                break  # exit loop if not
+
+            time.sleep(1)  # wait a bit before trying again.
 
         self.logging.critical("Unable to reconnect after {} attempts. Instrument remains disconnected".format(attempts))
         return False
@@ -355,8 +359,6 @@ class DAQ6510:
 
         self.logging.debug("Measuring resistance for DEAs: {} {}".format(deas, str_channels))
 
-        scan_timeout = 1 * n_channels * n_measurements  # should never take more than 1 second per measurement
-
         # self.send_command("*RST")
         self.send_command("FUNC 'VOLT:DC', {}".format(str_channels))
         self.send_command("VOLT:DC:RANG:AUTO ON, {}".format(str_channels))  # doesn't take long so might as well
@@ -374,21 +376,22 @@ class DAQ6510:
         dt_start = datetime.now()
         self.send_command("INIT")
         i = 1
+        scan_timeout = 1 * n_channels * n_measurements  # single measurement with DAQ can't be longer than 0.24 s
         start = time.perf_counter()
         elapsed = 0
         while i < n_channels * n_measurements:
             if elapsed > scan_timeout:
                 self.logging.warning("Invalid measurement! "
-                                     "Timeout elapsed before the expected amount of data wa received. "
+                                     "Timeout elapsed before the expected amount of data was received. "
                                      "Resetting instrument and returning 'None' result.")
                 self.reset()  # since the scan didn't finish, something went wrong so better reset for a fresh start
                 return None
-            time.sleep(0.1)
+            time.sleep(0.5)
             res = self.send_query("TRACe:ACTual?")
             try:
                 i = int(res)
             except Exception as ex:
-                self.logging.warning("Failed to parse response from multimeter: {} (Error: {})".format(res, ex))
+                self.logging.debug("Failed to parse response from multimeter: {} (Error: {})".format(res, ex))
 
             elapsed = time.perf_counter() - start
 
@@ -627,7 +630,7 @@ def test_current_measurements(nplc=1):
     print("Relays on:", hvps.set_relays_on([0]))
     # print("Relays on:", hvps.set_relays_on())
     hvps.set_voltage(0, block_until_reached=True)
-    hvps.set_switching_mode(0)
+    hvps.set_output_off()
 
     daq = DAQ6510()
     daq.connect(reset=True)
@@ -666,7 +669,7 @@ def test_current_measurements(nplc=1):
     ntotal = np.sum(n)
 
     hvps.set_voltage(0)  # ramp up voltage but OC remains off
-    hvps.set_switching_mode(0)  # open OC but leave voltage 0
+    hvps.set_output_off()  # open OC but leave voltage 0
     for i in range(n[0]):
         cur.append(float(daq.send_query("READ?")))
         V.append(hvps.get_current_voltage())
@@ -677,7 +680,7 @@ def test_current_measurements(nplc=1):
     if sw_mode == "OC":
         hvps.set_voltage(Vtest)  # ramp up voltage but OC remains off
     elif sw_mode == "DCDC":
-        hvps.set_switching_mode(1)  # open OC but leave voltage 0
+        hvps.set_output_on()  # open OC but leave voltage 0
     for i in range(n[1]):
         cur.append(float(daq.send_query("READ?")))
         V.append(hvps.get_current_voltage())
@@ -686,7 +689,7 @@ def test_current_measurements(nplc=1):
         print("{:.1f} %".format((n[0] + i) / ntotal * 100))
 
     if sw_mode == "OC":
-        hvps.set_switching_mode(1)  # open OC to apply Vtest to DEAs
+        hvps.set_output_off(n)  # open OC to apply Vtest to DEAs
     elif sw_mode == "DCDC":
         hvps.set_voltage(Vtest)  # ramp up voltage to Vtest
     for i in range(n[2]):
@@ -697,7 +700,7 @@ def test_current_measurements(nplc=1):
         print("{:.1f} %".format((n[0] + n[1] + i) / ntotal * 100))
 
     if sw_mode == "OC":
-        hvps.set_switching_mode(0)  # close OC to discharge DEAs
+        hvps.set_output_off()  # close OC to discharge DEAs
     elif sw_mode == "DCDC":
         hvps.set_voltage(0)  # reduce voltage to 0
     for i in range(n[3]):
@@ -711,7 +714,7 @@ def test_current_measurements(nplc=1):
     daq.send_command("ROUT:OPEN (@113)")
 
     hvps.set_voltage(0)
-    hvps.set_switching_mode(0)
+    hvps.set_output_off()
     hvps.set_relays_off()
     hvps.close()
 
