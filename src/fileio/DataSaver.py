@@ -38,6 +38,7 @@ class DataSaver:
             self.dataFields.append("DEA{}_electrical_state".format(i))
             self.dataFields.append("DEA{}_visual_state".format(i))
             self.dataFields.append("DEA{}_resistance".format(i))
+            self.dataFields.append("DEA{}_series_resistance".format(i))
             self.dataFields.append("DEA{}_strain_area".format(i))
             self.dataFields.append("DEA{}_strain_X".format(i))
             self.dataFields.append("DEA{}_strain_Y".format(i))
@@ -76,7 +77,8 @@ class DataSaver:
 
     def write_data(self, timestamp, elapsed_time, time_at_max_V, total_cycles, test_state, target_voltage,
                    measured_voltage,
-                   electrical_state=None, visual_state=None, strain_AXYa=None, center_shift=None, resistance=None,
+                   electrical_state=None, visual_state=None, strain_AXYa=None, center_shift=None,
+                   resistance=None, series_resistance=None,
                    leakage_current=None, pd_freq=None, pd_mag=None, image_saved=False):
 
         data = self.getDictField()
@@ -104,6 +106,8 @@ class DataSaver:
                 data["DEA{}_visual_state".format(disp_id)] = visual_state[i]
             if resistance is not None and i < len(resistance):
                 data["DEA{}_resistance".format(disp_id)] = resistance[i]
+            if series_resistance is not None and i < len(series_resistance):
+                data["DEA{}_series_resistance".format(disp_id)] = series_resistance[i]
             if strain_AXYa is not None and i < strain_AXYa.shape[0]:
                 data["DEA{}_strain_area".format(disp_id)] = strain_AXYa[i, 0]
                 data["DEA{}_strain_X".format(disp_id)] = strain_AXYa[i, 1]

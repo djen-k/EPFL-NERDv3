@@ -330,7 +330,7 @@ class DAQ6510:
         dt += timedelta(seconds=t_offset)  # add offset to sync device time with computer time
         return dt
 
-    def measure_DEA_resistance(self, deas, n_measurements=1, nplc=1, aperture=None):
+    def measure_DEA_resistance(self, deas, n_measurements=1, nplc=1, aperture=None, out_raw=None):
         """
         Measure 4-point electrode resistance on the specified channels.
         :param deas: A list of indices of the DEAs to measure (in range 0 to 5)
@@ -339,11 +339,15 @@ class DAQ6510:
         precedence over this parameter.
         :param nplc: The duration of each individual measurement in number of power line cycles (PLCs).
         If None, aperture (in seconds) is used instead. Otherwise nplc takes precedence.
+        :param out_raw: An optional dict parameter that will store all measured values: "Vsource" - the source voltage
+        of the resustance board, "Vshunt" - the voltage drop across the shunt resistor, "VDEA" - the voltage drop across
+        the active region of the DEA (as measured on the inner contacts), "Rshunt" - the resistance of the shunt
         :return: A 1-D numpy array of resistance values (one for each DEA), or None if the measurement was
         not successful.
         """
 
-        if not self.is_connected():
+        # check connection and try reconnecting once if not connected.
+        if not self.is_connected() and not self.reconnect(attempts=1):
             return None
 
         # TODO: Measure shunt resistor to calibrate current measurement
@@ -403,12 +407,18 @@ class DAQ6510:
         np.set_printoptions(formatter={'float': '{: 0.3f}'.format})  # set print format for arrays
 
         # check the source voltage
-        Vsource = data[:, 0]
+        Vsource = np.mean(data[:, 0])
         data = data[:, 1:]  # don't need the reference voltage anymore
         data = np.reshape(data, (n_measurements, n_deas, 2))
-        Vshunt = data[:, :, 0]
-        VDEA = data[:, :, 1]
+        Vshunt = np.mean(data[:, :, 0], axis=0)
+        VDEA = np.mean(data[:, :, 1], axis=0)
         Rshunt = 100000  # 100kOhm  TODO: read in real calibration data
+
+        if out_raw is not None:  # write measured value to dict so they can be used outside
+            out_raw["Vsource"] = Vsource
+            out_raw["Vshunt"] = Vshunt
+            out_raw["Rshunt"] = Rshunt
+            out_raw["VDEA"] = VDEA
 
         Vshunt[Vshunt < 0.1] = np.nan
         VDEA[VDEA < 0.1] = np.nan
@@ -421,15 +431,13 @@ class DAQ6510:
         self.logging.debug("Voltage across electrode: {} V".format(np.array2string(VDEA, precision=3)))
         self.logging.debug("Electrode resistance: {} kΩ".format(np.array2string(RDEA / 1000, precision=3)))
 
-        RDEA = np.mean(RDEA, axis=0)  # take avg even for single measurement to reduce to 1-D array
         self.logging.debug("Average resistance: {} kΩ".format(np.array2string(RDEA / 1000, precision=3)))
-
-        if np.any(Vsource < 9) or np.any(Vsource > 10):
+        if 9 < Vsource < 10:
+            self.logging.debug("Source voltage for resistance measurement is {}V".format(Vsource))
+        else:
             msg = "Source voltage for resistance measurement is outside the expected range: {}V".format(Vsource)
             self.logging.warning(msg)
             RDEA[:] = np.nan  # to make it obvious something is wrong
-        else:
-            self.logging.debug("Source voltage for resistance measurement is {}V".format(Vsource))
 
         return RDEA
 
@@ -542,6 +550,10 @@ class DAQ6510:
         1-5 PLCs gives the lowest noise according to the DAQ6510 manual.
         :return: A single current reading in A.
         """
+
+        # check connection and try reconnecting once if not connected.
+        if not self.is_connected() and not self.reconnect(attempts=1):
+            return None
 
         self.logging.debug("Measuring current")
 

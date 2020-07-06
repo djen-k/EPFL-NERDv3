@@ -194,6 +194,7 @@ class NERD:
         measured_voltage = 0
         prev_V_high = False
         Rdea = None
+        R_series = None
         leakage_current = None
         leakage_cur_avg = None
         leakage_buf = []
@@ -454,11 +455,18 @@ class NERD:
                 if self.daq is not None:  # perform electrical measurements if possible
 
                     # measure resistance
-                    Rdea = self.daq.measure_DEA_resistance(self.active_dea_indices, n_measurements=1, nplc=1)  # 1-D np array
+                    res_raw = {}  # empty dict to store raw resistance measurement data
+                    Rdea = self.daq.measure_DEA_resistance(self.active_dea_indices,  # 1-D np array
+                                                           n_measurements=1, nplc=1,
+                                                           out_raw=res_raw)
                     if Rdea is not None:
                         self.logging.info("Resistance [kΩ]: {}".format(Rdea / 1000))
                     else:
                         self.logging.info("Resistance measurement failed (returned None)")
+
+                    # calculate total series resistance of the bottom electrode
+                    I_shunt = res_raw["Vshunt"] / res_raw["Rshunt"]  # current measured through shunt resistor
+                    R_series = res_raw["Vsource"] / I_shunt - res_raw["Rshunt"]
 
                     # aggregate current measurements
                     if ac_active or len(leakage_buf) == 0:
@@ -525,6 +533,7 @@ class NERD:
                                  strain,
                                  center_shifts,
                                  Rdea,
+                                 R_series,
                                  leakage_cur_avg,
                                  image_saved=image_due)
 
