@@ -144,7 +144,7 @@ class DAQ6510:
             self.logging.debug("{} disconnected.".format(self.instrument_name))
             # reset all fields
             self.instrument = None
-            self.instrument_id = None
+            # self.instrument_id = None  # keep instrument ID so we don't forget what instrument to connect to
             self.instrument_name = None
             self.serial_number = None
             self.firmware_version = None
@@ -158,27 +158,29 @@ class DAQ6510:
 
     def reconnect(self, attempts=3):
         """
-        Try to reconnect to the instrument by disconnecting and connecting again to the same device. If unseccessful,
+        Try to reconnect to the instrument by disconnecting and connecting again to the same device. If unsuccessful,
         reconnection will be attempted for the specified number of times before aborting the effort.
         :param attempts: The maximum number of reconnection attempts to perform. Set to -1 (default) to keep trying
         indefinitely. If 0, no attempts are made and the instrument remains disconnected.
         :return: True if the instrument was successfully reconnected, or False if after the specified number of attempts
         reconnection was not successful.
         """
-        msg = "Multimeter lost connection"
-        self.logging.info(msg)
-        logging.getLogger("Disruption").info(msg)  # log to separate disruption log file
+
+        if self.is_connected():  # if it still thinks it's connected, this must be the first reconnect attempt
+            msg = "Multimeter lost connection"
+            self.logging.info(msg)
+            logging.getLogger("Disruption").info(msg)  # log to separate disruption log file
 
         attempts_performed = 0
-        inst_id = self.instrument_id  # remember current instrument ID so we can reconnect to the same one
         while True:  # keep trying to reconnect
             attempts_performed += 1
-            self.logging.debug("Trying to reconnect instrument...  (attempt {})".format(attempts_performed))
+            msg = "Trying to reconnect instrument...  (attempt {} of {})"
+            self.logging.debug(msg.format(attempts_performed, attempts))
             try:
-                self.disconnect()
-                connected = self.connect(inst_id, reset=False)
+                self.disconnect()  # reset instrument (instrument ID is remembered)
+                connected = self.connect(self.instrument_id, reset=False)
                 if connected:
-                    msg = "Multimeter reconnected successfuly after {} attempts.".format(attempts_performed)
+                    msg = "Multimeter reconnected successfully after {} attempts.".format(attempts_performed)
                     self.logging.info(msg)
                     logging.getLogger("Disruption").info(msg)  # log to separate disruption log file
                     return True
@@ -187,7 +189,7 @@ class DAQ6510:
             except Exception as ex:
                 self.logging.debug("Reconnection attempt failed: {}".format(ex))
 
-            if attempts < 0 or attempts_performed < attempts:  # check if we should keep trying
+            if attempts < 0 or attempts_performed >= attempts:  # check if we should keep trying
                 break  # exit loop if not
 
             time.sleep(1)  # wait a bit before trying again.
@@ -196,9 +198,9 @@ class DAQ6510:
         return False
 
     def send_command(self, command):
-        if not self.is_connected():
-            raise Exception("Not connected to any instrument")
-        self.logging.debug("Sending command: {}".format(command))
+        # if not self.is_connected():
+        #     raise Exception("Not connected to any instrument")
+        # self.logging.debug("Sending command: {}".format(command))
         try:
             self.instrument.write(command)
         except Exception as ex:
@@ -207,9 +209,12 @@ class DAQ6510:
                 self.send_command(command)
 
     def send_query(self, command):
+        # if not self.is_connected():
+        #     raise Exception("Not connected to any instrument")
+        # self.logging.debug("Sending query: {}".format(command))
         if not self.is_connected():
-            raise Exception("Not connected to any instrument")
-        self.logging.debug("Sending query: {}".format(command))
+            return None
+
         try:
             res = self.instrument.query(command)
             self.logging.debug("Response: {}".format(res))
@@ -330,7 +335,7 @@ class DAQ6510:
         dt += timedelta(seconds=t_offset)  # add offset to sync device time with computer time
         return dt
 
-    def measure_DEA_resistance(self, deas, n_measurements=1, nplc=1, aperture=None, out_raw=None):
+    def measure_DEA_resistance(self, deas, n_measurements=1, nplc=1, aperture=None, out_raw=None, reconnects=1):
         """
         Measure 4-point electrode resistance on the specified channels.
         :param deas: A list of indices of the DEAs to measure (in range 0 to 5)
@@ -342,12 +347,13 @@ class DAQ6510:
         :param out_raw: An optional dict parameter that will store all measured values: "Vsource" - the source voltage
         of the resustance board, "Vshunt" - the voltage drop across the shunt resistor, "VDEA" - the voltage drop across
         the active region of the DEA (as measured on the inner contacts), "Rshunt" - the resistance of the shunt
+        :param reconnects: How often to try reconnecting if the instrument is not connected. Default: 1
         :return: A 1-D numpy array of resistance values (one for each DEA), or None if the measurement was
         not successful.
         """
 
         # check connection and try reconnecting once if not connected.
-        if not self.is_connected() and not self.reconnect(attempts=1):
+        if not self.is_connected() and (reconnects == 0 or not self.reconnect(attempts=reconnects)):
             return None
 
         # TODO: Measure shunt resistor to calibrate current measurement
@@ -542,17 +548,21 @@ class DAQ6510:
         # return RDEA
         return np.array((shunt_res_on, shunt_res_off))
 
-    def measure_current(self, nplc=1):
+    def measure_current(self, nplc=1, reconnects=0):
         """
         Take a single current measurement on channel 122. 9V5 supply to shunt resistors is switched off before the
         measurement is taken.
         :param nplc: The length of the measurement in number of power line cycles. Can be fractional.
         1-5 PLCs gives the lowest noise according to the DAQ6510 manual.
+        :param reconnects: How often tro try reconnecting if the instrument is not connected. Default: 0 (will return
+        None immediately without trying to reconnect)
         :return: A single current reading in A.
         """
 
         # check connection and try reconnecting once if not connected.
-        if not self.is_connected() and not self.reconnect(attempts=1):
+        if not self.is_connected() and (reconnects == 0 or not self.reconnect(attempts=reconnects)):
+            if reconnects > 0:
+                self.logging.warning("No current measurement was taken because the instrument is not connected")
             return None
 
         self.logging.debug("Measuring current")

@@ -34,7 +34,7 @@ class Switchboard:
     def __init__(self, port=None):
         super().__init__()
         self.logging = logging.getLogger("Switchboard")  # change logger to "Switchboard"
-        # self.logging.setLevel(logging.INFO)  # TODO: decide globally who logs at what level
+        # self.logging.setLevel(logging.INFO)  # keep switchboard from spamming the console
 
         self.port = port
         self.name = ''
@@ -449,12 +449,12 @@ class Switchboard:
         if not block_until_reached:  # don't wait, return immediately
             return res == voltage
 
-        timeout = 30  # if voltage has not reached its set point in 30 s, something is definitely wrong!
+        timeout = 60  # if voltage has not reached its set point in 30 s, something is definitely wrong!
         start = time.perf_counter()
         elapsed = 0
         while abs(voltage - self.get_current_voltage()) > 50:
             if elapsed > timeout:
-                msg = "Voltage has not reached the set point after 5 seconds! Please check the HVPS!"
+                msg = "Voltage has not reached the set point after {} seconds! Please check the HVPS!".format(timeout)
                 raise TimeoutError(msg)
             if elapsed == 0:  # only write message once
                 self.logging.debug("Waiting for measured output voltage to reach the set point...")

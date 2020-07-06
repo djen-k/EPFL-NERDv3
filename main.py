@@ -251,7 +251,6 @@ class NERD:
                     msg = msg.format(current_step, nsteps, current_target_voltage, dt_state_change, step_duration_s)
                     self.logging.info(msg)
                 elif current_state == STATE_WAITING_HIGH:
-                    self.hvps.set_voltage(current_target_voltage)
                     msg = "Waiting high: {:.0f}/{} s".format(dt_state_change, duration_high_s)
                     if ac_mode:
                         msg += " ({:.0f} cycles)".format(cycles_completed)
@@ -397,7 +396,8 @@ class NERD:
 
                 # measure leakage current
                 if self.daq is not None and not ac_active:
-                    leakage_current = self.daq.measure_current(nplc=3)  # measure total current for n power line cycles
+                    # quick current measurement
+                    leakage_current = self.daq.measure_current(nplc=1)
                     if leakage_current is not None:
                         leakage_buf.append(leakage_current)  # append to buffer so we can average when we write the data
 
@@ -465,8 +465,13 @@ class NERD:
                         self.logging.info("Resistance measurement failed (returned None)")
 
                     # calculate total series resistance of the bottom electrode
-                    I_shunt = res_raw["Vshunt"] / res_raw["Rshunt"]  # current measured through shunt resistor
-                    R_series = res_raw["Vsource"] / I_shunt - res_raw["Rshunt"]
+                    if len(res_raw) > 0:  # dict has been populated
+                        try:
+                            I_shunt = res_raw["Vshunt"] / res_raw["Rshunt"]  # current measured through shunt resistor
+                            R_series = res_raw["Vsource"] / I_shunt - res_raw["Rshunt"]
+                        except Exception as ex:
+                            self.logging.warning("Couldn't calculate series resistance. Error: {}".format(ex))
+                            R_series = None
 
                     # aggregate current measurements
                     if ac_active or len(leakage_buf) == 0:
@@ -477,7 +482,10 @@ class NERD:
                     else:
                         leakage_cur_avg = np.mean(leakage_buf)  # average all current readings since the last time
                     leakage_buf = []  # reset buffer
-                    self.logging.info("Leakage current [nA]: {}".format(leakage_cur_avg * 1000000000))
+                    if leakage_cur_avg is not None:
+                        self.logging.info("Leakage current [nA]: {}".format(leakage_cur_avg * 1000000000))
+                    else:
+                        self.logging.info("No leakage current measurement available")
 
                 # --- resume cycling if in AC mode -------------------------------------
                 if ac_paused:
