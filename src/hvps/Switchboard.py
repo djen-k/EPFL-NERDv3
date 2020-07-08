@@ -199,7 +199,7 @@ class Switchboard:
             self.stop_voltage_reading(wait=True)
             if self.ser.is_open:
                 with self.serial_com_lock:
-                    self.set_voltage(0, block_while_testing=True)  # set the voltage to 0 as a safety measure
+                    self.set_voltage(0, block_until_set=True)  # set the voltage to 0 as a safety measure
                     self.set_output_off()  # disable OCs and H-bridge
                     self.set_relays_off()
                     self.ser.close()
@@ -401,93 +401,109 @@ class Switchboard:
         return res == vmax
 
     def get_voltage_setpoint(self):
-        """Query the voltage setpoint of the switchboard"""
+        """Query the voltage set point of the switchboard"""
         return self._cast_int(self.send_query("QVset"))
 
-    def set_voltage(self, voltage, block_while_testing=False, block_until_reached=False):  # sets the output voltage
+    def set_voltage(self, target_voltage, block_until_set=False, block_until_reached=False):  # sets the output voltage
         """
         Sets the output voltage.
         Checks if voltage can be set or if switchboard is currently testing for a short circuit
-        :param voltage: The desired output voltage
-        :param block_while_testing: Flag to indicate if the function should block until the voltage can be set.
+        :param target_voltage: The desired output voltage
+        :param block_until_set: Flag to indicate if the function should block until the voltage has been set.
         The voltage set point cannot be changed while the switchboard is testing for short circuits.
-        Set this to True, if you want the function to block until the switchboard has finished testing (if it was).
+        Set this to True, if you want the function to block until the switchboard has finished testing (if it was)
+        and has confirmed that the set point has been updated to the target value.
         If false, the function may return without having set the voltage. Check response from switchboard!
         :param block_until_reached: Flag to indicate if the function should block until the measured voltage matches the
         voltage set point (with a 10V margin). If the set point is not reached within 3s, a TimeoutError is raised.
-        :return: True if the voltage was set successfuly, false if the switchboard was unable to set the voltage because
+        :return: True if the voltage was set successfully, false if the switchboard was unable to set the voltage because
         it was busy testing for a short circuit or some other error occurred. If 'block_if_testing' is True,
         a False return value indicates an unexpected error.
         """
 
         if block_until_reached:
-            block_while_testing = True  # it can't reach if it's not set successfully
+            block_until_set = True  # it can't reach if it's not set successfully
 
         # check that specified voltage is within the allowed range #######################################
 
-        if voltage != 0 and voltage < self.minimum_voltage:
+        if target_voltage != 0 and target_voltage < self.minimum_voltage:
             msg = "Specified voltage ({}) is below the allowed minimum ({}). Setting voltage to 0!"
-            self.logging.warning(msg.format(voltage, self.minimum_voltage))
-            voltage = 0
+            self.logging.warning(msg.format(target_voltage, self.minimum_voltage))
+            target_voltage = 0
 
-        if voltage > self.maximum_voltage:
+        if target_voltage > self.maximum_voltage:
             msg = "Specified voltage ({}) is above the allowed maximum ({}). Setting voltage to {}}!"
-            self.logging.warning(msg.format(voltage, self.maximum_voltage, self.maximum_voltage))
-            voltage = self.maximum_voltage
+            self.logging.warning(msg.format(target_voltage, self.maximum_voltage, self.maximum_voltage))
+            target_voltage = self.maximum_voltage
 
-        # make sure that the new voltage set point was accepted (it won't be while it's testing) ###############
+        # set target voltage and make sure that the new voltage set point was accepted ###############
 
-        if block_while_testing:
+        self.vset = target_voltage  # update internal model
+        current_setpoint = -1
+        while current_setpoint != target_voltage:
+            res = self._cast_int(self.send_query("SVset {:.0f}".format(target_voltage)))
+            msg = "Voltage set to {} V. Previously {} V. Response: {}"
+            self.logging.info(msg.format(target_voltage, current_setpoint, res))
+            if not block_until_set:  # don't wait, return immediately
+                return res == target_voltage
+
             if self.is_testing():
-                self.logging.debug("Switchboard is busy testing for shorts. Waiting to set voltage...")
+                self.logging.info("Switchboard is busy testing for shorts. Waiting to set voltage...")
             while self.is_testing():
                 time.sleep(0.1)
 
-        self.vset = voltage  # update internal model
-        res = self._cast_int(self.send_query("SVset {:.0f}".format(voltage)))
+            current_setpoint = self.get_voltage_setpoint()
 
-        if not block_until_reached:  # don't wait, return immediately
-            return res == voltage
+        if not block_until_reached:  # don't wait until reached
+            return True  # return True since we waited until we have received confirmation
 
-        timeout = 60  # if voltage has not reached its set point in 30 s, something is definitely wrong!
+        timeout = 10  # if voltage has not reached its set point in 10 s, something is definitely wrong!
         start = time.perf_counter()
         elapsed = 0
-        while abs(voltage - self.get_current_voltage()) > 50:
+        while abs(target_voltage - self.get_current_voltage()) > 50:
             if elapsed > timeout:
-                msg = "Voltage has not reached the set point after {} seconds! Please check the HVPS!".format(timeout)
-                raise TimeoutError(msg)
+                msg = "Voltage has not reached the set point after {} seconds! Voltage was set to 0!".format(timeout)
+                self.logging.warning(msg)
+                self.set_voltage(0)  # close explicitly because somehow it doesn't seem to get called during shutdown
+                return False
+                # raise TimeoutError(msg)
             if elapsed == 0:  # only write message once
-                self.logging.debug("Waiting for measured output voltage to reach the set point...")
+                self.logging.info("Waiting for measured output voltage to reach the set point...")
             time.sleep(0.05)
-            while self.is_testing():
-                self.logging.debug("Switchboard is testing for shorts...")
-                time.sleep(0.5)
+            if self.is_testing():
+                self.logging.info("Switchboard is testing for shorts...")
+                while self.is_testing():  # wait until test is over
+                    time.sleep(0.5)
                 start = time.perf_counter()  # if SB is busy checking for shorts, don't start counting timeout
 
             elapsed = time.perf_counter() - start
 
         return True  # if we reached here, it must have been set correctly
 
-    def set_voltage_no_overshoot(self, voltage):
+    def set_voltage_no_overshoot(self, target_voltage):
         """
         Sets the output voltage to the specified value, but does so more slowly in several steps to ensure that there
         is no voltage overshoot. This method blocks until the desired voltage has been reached.
-        :param voltage: The desired output voltage, in Volts.
+        :param target_voltage: The desired output voltage, in Volts.
         :return: True or False to indicate if the voltage was set correctly.
         """
         prev_v = self.get_current_voltage(True)
-        dv = voltage - prev_v
-        if dv > 100 and voltage > self.minimum_voltage:  # if increasing (and by more than a few volts), do it slowly
-            self.set_voltage(round(prev_v + dv * 0.7), block_until_reached=True)
-            self.set_voltage(round(prev_v + dv * 0.9), block_until_reached=True)
-        return self.set_voltage(voltage, block_until_reached=True)
+        dv = target_voltage - prev_v
+        if dv > 100:  # if increasing by more than a few volts, do it slowly
+            for voltage_fraction in [0.7, 0.9]:  # multiple steps up to 1
+                temp_target = round(prev_v + dv * voltage_fraction)
+                if temp_target > self.minimum_voltage:
+                    self.set_voltage(temp_target, block_until_reached=True)
+
+        # at then end, make sure to set it to the target voltage
+        return self.set_voltage(target_voltage, block_until_reached=True)
 
     def get_current_voltage(self, from_buffer_if_available=True):
         """
         Read the current voltage from the switchboard
         :param from_buffer_if_available: If true and if continuous voltage reading is on, the most recent value from
         the voltage buffer is returned instead of querying the switchboard.
-        :return: The current voltage as measrued by the switchboard voltage feedback.
+        :return: The current voltage as measured by the switchboard voltage feedback.
         """
         if from_buffer_if_available is True and self.reading_thread.is_alive():
             with self.buffer_lock:
@@ -682,7 +698,7 @@ class Switchboard:
         Checks if the switchboard is currently testing for a short circuit
         :return: True, if the switchboard is currently busy testing
         """
-        self.logging.debug("Querying if switchbaord is testing")
+        self.logging.debug("Querying if switchboard is testing")
         res = self.send_query("QTestingShort")
         return res == "1"
 
