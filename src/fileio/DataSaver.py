@@ -55,6 +55,7 @@ class DataSaver:
             self.units.append("[1: OK, 0: Failed]")
             self.units.append("[1: OK, 0: Failed]")
             self.units.append("[Ohm]")
+            self.units.append("[Ohm]")
             self.units.append("[%]")
             self.units.append("[%]")
             self.units.append("[%]")
