@@ -119,6 +119,8 @@ class NERD:
 
         now_tstamp = datetime.now()
         session_name = "NERD test {}".format(now_tstamp.strftime("%Y%m%d-%H%M%S"))
+        if self.config["title"]:
+            session_name += " " + self.config["title"]
         dir_name = "output/{}".format(session_name)
 
         cap = self.image_cap  # get image capture

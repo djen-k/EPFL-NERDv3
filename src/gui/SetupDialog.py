@@ -145,6 +145,10 @@ class SetupDialog(QtWidgets.QDialog):
         form_parameters = QtWidgets.QFormLayout()
         form_parameters.setLabelAlignment(Qt.AlignRight)
 
+        # textbox to set a title/label/description for the test
+        self.test_title = QtWidgets.QLineEdit()
+        form_parameters.addRow("Title:", self.test_title)
+
         # checkbox to enable AC mode
         self.chk_ac = QtWidgets.QCheckBox("AC mode")
         self.chk_ac.clicked.connect(self.chkACClicked)
@@ -821,6 +825,7 @@ class SetupDialog(QtWidgets.QDialog):
         config = {
             "com_port": sb_id,
             "daq_id": daq_id,
+            "title": self.test_title.text(),
             "cam_order": self.getCamOrder(),
             "active_DEAs": self.getActiveSamples(),
             "voltage": self.num_voltage.value(),

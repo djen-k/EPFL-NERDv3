@@ -204,7 +204,7 @@ class DAQ6510:
         try:
             self.instrument.write(command)
         except Exception as ex:
-            self.logging.error("Error receiving data: {}".format(ex))
+            self.logging.error("Error sending data: {}".format(ex))
             if self.reconnect():
                 self.send_command(command)
 
@@ -355,9 +355,6 @@ class DAQ6510:
         # check connection and try reconnecting once if not connected.
         if not self.is_connected() and (reconnects == 0 or not self.reconnect(attempts=reconnects)):
             return None
-
-        # TODO: Measure shunt resistor to calibrate current measurement
-        # TODO: Take two-point resistance measurement of electrode to check quality of contact and warn if bad
 
         n_deas = len(deas)
         if n_deas == 0:
@@ -546,7 +543,8 @@ class DAQ6510:
         # self.logging.debug("Average resistance: {} kΩ".format(np.array2string(RDEA / 1000, precision=3)))
 
         # return RDEA
-        return np.array((shunt_res_on, shunt_res_off))
+        # return np.array((shunt_res_on, shunt_res_off))
+        return None
 
     def measure_current(self, nplc=1, reconnects=0):
         """
@@ -716,7 +714,7 @@ def test_current_measurements(nplc=1):
         print("{:.1f} %".format((n[0] + i) / ntotal * 100))
 
     if sw_mode == "OC":
-        hvps.set_output_off(n)  # open OC to apply Vtest to DEAs
+        hvps.set_output_off()  # open OC to apply Vtest to DEAs
     elif sw_mode == "DCDC":
         hvps.set_voltage(Vtest)  # ramp up voltage to Vtest
     for i in range(n[2]):
@@ -870,7 +868,7 @@ def measure_resistance_sequence():
     print("Relays on:", hvps.set_relays_on())
     # make sure everything is discharged
     hvps.set_voltage(0)
-    hvps.set_switching_mode(0)
+    hvps.set_output_off()
     V = []
     t = []
 
@@ -878,7 +876,7 @@ def measure_resistance_sequence():
     #  run test
     ########################################################
 
-    hvps.set_switching_mode(1)
+    hvps.set_output_on()
     print("Recording data...")
 
     #  start recording
@@ -1005,7 +1003,7 @@ def measure_sequence_all():
     print("Relays on:", hvps.set_relays_on())
     # make sure everything is discharged
     hvps.set_voltage(0)
-    hvps.set_switching_mode(0)
+    hvps.set_output_off()
     SW = []
     tSW = []
 
@@ -1035,7 +1033,7 @@ def measure_sequence_all():
     time.sleep(0.5)  # wait for DCDC output to rise
 
     # set OC on
-    hvps.set_switching_mode(1)
+    hvps.set_output_on()
     tnow = time.perf_counter()
     tSW.append(tnow)
     SW.append(0)
@@ -1045,7 +1043,7 @@ def measure_sequence_all():
     time.sleep(6)  # wait high
 
     # set OC off
-    hvps.set_switching_mode(0)
+    hvps.set_output_off()
     tnow = time.perf_counter()
     tSW.append(tnow)
     SW.append(1)
@@ -1151,7 +1149,7 @@ def test_digitize_current():
     print("Connected to HVPS", hvps.get_name())
     print("Relays on:", hvps.set_relays_on())
     hvps.set_voltage(0)
-    hvps.set_switching_mode(0)
+    hvps.set_output_off()
 
     t = 3  # measurement duration in sec
     sample_rate = 1000000  # 1000000
@@ -1196,23 +1194,23 @@ def test_digitize_current():
 
     # measure everything off for a moment
     hvps.set_voltage(0)
-    hvps.set_switching_mode(0)
+    hvps.set_output_off()
     time.sleep(0.1 * t)
 
     if sw_mode == "OC":
         hvps.set_voltage(Vtest)  # ramp up voltage but OC remains off
     elif sw_mode == "DCDC":
-        hvps.set_switching_mode(1)  # open OC but leave voltage 0
+        hvps.set_output_on()  # open OC but leave voltage 0
     time.sleep(0.1 * t)
 
     if sw_mode == "OC":
-        hvps.set_switching_mode(1)  # open OC to apply Vtest to DEAs
+        hvps.set_output_on()  # open OC to apply Vtest to DEAs
     elif sw_mode == "DCDC":
         hvps.set_voltage(Vtest)  # ramp up voltage to Vtest
     time.sleep(0.4 * t)
 
     if sw_mode == "OC":
-        hvps.set_switching_mode(0)  # close OC to discharge DEAs
+        hvps.set_output_off()  # close OC to discharge DEAs
     elif sw_mode == "DCDC":
         hvps.set_voltage(0)  # reduce voltage to 0
 
@@ -1258,7 +1256,7 @@ def test_digitize_voltage():
     print("Connected to HVPS", hvps.get_name())
     print("Relays on:", hvps.set_relays_on([0]))
     hvps.set_voltage(0)
-    hvps.set_switching_mode(0)
+    hvps.set_output_off()
 
     t = 3  # measurement duration 1s
     count = 1000000 * t  # 1 MHz sample rate

@@ -3,6 +3,7 @@ import logging
 import time
 from collections import deque
 from datetime import datetime
+from functools import wraps
 from sys import stdout
 from threading import Thread, Event, Lock, RLock
 
@@ -39,8 +40,8 @@ class Switchboard:
         self.port = port
         self.name = ''
         self.firmware_version = 0
-        self.minimum_voltage = 500
-        self.maximum_voltage = 4800
+        self.minimum_voltage = 100
+        self.maximum_voltage = 5000
         self.vset = 0
         self.vnow = 0
         self.oc_freq = 0
@@ -90,7 +91,7 @@ class Switchboard:
     ###########################################################################
 
     @staticmethod
-    def detect(n=0):
+    def detect():
         """Detect available HVPS"""
         logger = logging.getLogger("Switchboard")  # change logger to "Switchboard"
         logger.debug("Detecting available switchboards")
@@ -103,24 +104,23 @@ class Switchboard:
                     sb.open(with_continuous_reading=False)
                     logger.info("Device {} found at port {}".format(sb.name, sb.port))
                     available_switchboards.append(sb)
-                    sb.close()
-
-                    if 0 < n == len(available_switchboards):
-                        break  # already found the desired number of available devices
                 except Exception as ex:
                     logger.debug("Unable to connect to device on port {}. Exception: {}".format(sb.port, ex))
+                finally:
+                    sb.close()  # make sure it's closed properly'
+                    del sb
 
         if not available_switchboards:
             logger.warning("No switchboards found!")
-        elif len(available_switchboards) < n:
-            logger.warning("The requested number of switchboards could not be found!")
         else:
             logger.info("Switchboard detection done. Found {} devices.".format(len(available_switchboards)))
+
+        time.sleep(1)
         return available_switchboards
 
     def _open_connection(self):
         """
-        Establishes connection with the HVPS. An exception is raised it the connection could not be established.
+        Establishes connection with the HVPS. An exception is raised if the connection could not be established.
         """
         self.logging.debug("Connecting to {}".format(self.port))
         with self.serial_com_lock:
@@ -139,6 +139,7 @@ class Switchboard:
                 self.name = self.get_name()
                 self.firmware_version = self.get_firmware_version()
                 self.maximum_voltage = self.get_maximum_voltage()
+                self.minimum_voltage = self.get_minimum_voltage()
 
                 # reset switchboard to make sure we're in a known state
                 self.set_voltage(0)
@@ -164,21 +165,21 @@ class Switchboard:
 
         # figure out which port to connect to
 
-        if port is not None:
-            self.port = port
+        if port is None:  # no port given
+            if self.port is not None:  # check if one was already specified
+                port = self.port
+            else:  # no port specified, so we search for an available port
+                port = 0
 
-        if self.port is None:  # if not defined, autodetect HVPS
-            sb = Switchboard.detect(1)[0]  # get the first switchboard we can find
-            port = sb.port
-            del sb  # get rid of the switchboard object to release the com port
-            self.open(port, with_continuous_reading)
-        elif isinstance(self.port, int):  # specified as index  -> pick from list of available ports
+        if isinstance(port, int):  # specified as index  -> pick from list of available ports
             sbs = Switchboard.detect()  # get the first switchboard we can find
-            if len(sbs) > self.port:
+            if len(sbs) > port:
                 self.port = sbs[port].port
             else:
                 raise ValueError("Invalid switchboard index: {}! This device does not exist!".format(self.port))
-        elif not isinstance(self.port, str):
+        elif isinstance(port, str):
+            self.port = port  # in case this was user specified and not yet stored as object property
+        else:
             raise ValueError("Invalid argument! COM port must be given as a string or index!")
 
         # connect to HVPS
@@ -207,7 +208,7 @@ class Switchboard:
             self.is_open = False
             self.logging.info("Connection to {} closed.".format(self.name))
 
-    def dirty_reconnect(self):
+    def _reconnect(self):
 
         msg = "Switchboard lost connection"
         self.logging.info(msg)
@@ -221,8 +222,9 @@ class Switchboard:
         start = time.perf_counter()
         while not self.ser.is_open:
             try:
-                self.ser.open()
+                self.ser.open()  # throws exception if unsuccessful
 
+                # If no exception was raised, connection must have been successful
                 # resume operation by restoring the previous state
                 self.set_voltage(self.vset)
 
@@ -293,7 +295,7 @@ class Switchboard:
                 time.sleep(0.01)
         except Exception as ex:
             self.logging.critical("Error writing to HVPS: {}".format(ex))
-            self.dirty_reconnect()
+            self._reconnect()
 
     def _read_hvps(self):
         """
@@ -313,16 +315,16 @@ class Switchboard:
 
                 if res.startswith("["):  # info/warning/error
                     # TODO: log switchboard messages properly and raise flag in case of warnings
-                    self.logging.debug("Message from Switchboard: {}".format(res))
+                    self.logging.info("Message from Switchboard: {}".format(res))
 
                     res = self._read_hvps()  # read another line
                 elif res.startswith("Err"):
-                    self.logging.warning("Invalid command! Returned error.")
+                    self.logging.warning("Invalid command! Returned error: {}".format(res))
                     res = None
 
         except Exception as ex:
             self.logging.critical("Error reading from HVPS: {}".format(ex))
-            self.dirty_reconnect()
+            self._reconnect()
             res = None  # connection was lost so we never got the expected return message
 
         self.logging.debug("Response from HVPS: {}".format(res))
@@ -366,30 +368,80 @@ class Switchboard:
             return None, None  # return None to indicate something is wrong
 
         try:
-            str_state = str_state.replace(":", ";")  # because v1 and v2 have different formats
-            str_state = str_state.split(";")  # separate response for each relay
-            mode = self._cast_int(str_state[0])  # is either the relay mode or just "Relay state" (-> -1)
-            # TODO: use relay mode to detect if switchboard was reset!
-            state = str_state[1].split(",")  # split individual states
+            state = str_state.split(",")  # split individual states
             state = [self._cast_int(r) for r in state if r]  # convert to int if string is not empty
         except Exception as ex:
             self.logging.warning("Failed to parse relay state: {}. Error: {}".format(str_state, ex))
             return None, None  # return None to indicate something is wrong
 
         if len(state) == 6:  # output is only valid if there is a state for each relay
-            return mode, state
+            return state
         else:
             self.logging.warning("Invalid response. Received {} values instead of 6.".format(len(state)))
-            return None, None  # return None to indicate something is wrong
+            return None
+
+    def diagnose_comms_failure(self, attempt):
+        self.logging.info("Running diagnosis of serial communication: attempt {}".format(attempt))
+        if attempt == 1:
+            self.logging.info("Resetting serial buffers")
+            self.ser.reset_output_buffer()
+            self.ser.reset_input_buffer()
+        else:  # attempt 2+
+            # Close and reopen serial connection
+            self._reconnect()
+        if attempt > 3:  # already tried rebooting once
+            self.logging.info("Reboot unsuccessful. Waiting 10 s before trying again.")
+            time.sleep(10)
+        if attempt > 2:
+            # reboot switchboard
+            self.reboot()
 
     ###########################################################################
     # getters and setters #####################################################
     ###########################################################################
 
+    def _assert_success(func):
+        """
+        Checks each setter and getter function to make sure that the expected response was received.
+        If not successful, diagnosis is performed and the setter function is called repeatedly until it is successful
+        :param func: The setter function to check
+        :return: the wrapped setter function
+        """
+
+        @wraps(func)
+        def wrapped(inst, *args, **kwargs):
+            success = False
+            attempts = 0
+            while not success:
+                if attempts > 0:
+                    inst.diagnose_comms_failure(attempts)
+                result = func(inst, *args, **kwargs)
+                if func.__name__.startswith("set"):  # getter - returns False if the parameter was not set successfully
+                    success = result
+                else:  # getter - might return False as a legitimate response -> need to check more thoroughly
+                    if result is None or result == -1:
+                        success = False
+                    elif isinstance(result, list):
+                        success = -1 not in result
+                    else:
+                        success = True
+                attempts += 1
+
+            return result
+
+        return wrapped
+
+    @_assert_success
     def get_maximum_voltage(self):
         """Query the maximum voltage of the switchboard"""
         return self._cast_int(self.send_query("QVmax"))
 
+    @_assert_success
+    def get_minimum_voltage(self):
+        """Query the minimum voltage of the switchboard"""
+        return self._cast_int(self.send_query("QVmin"))
+
+    @_assert_success
     def set_maximum_voltage(self, vmax):
         """
         Set the maximum voltage of the switchboard. Will be saved to EEPROM.
@@ -400,10 +452,23 @@ class Switchboard:
         res = self._cast_int(self.send_query("SVmax {:.0f}".format(vmax)))
         return res == vmax
 
+    @_assert_success
+    def set_minimum_voltage(self, vmin):
+        """
+        Set the minimum voltage of the switchboard. Will be saved to EEPROM.
+        :param vmin: The maximum voltage
+        :return: True, if the voltage was set correctly
+        """
+        self.minimum_voltage = vmin  # update internal model
+        res = self._cast_int(self.send_query("SVmin {:.0f}".format(vmin)))
+        return res == vmin
+
+    @_assert_success
     def get_voltage_setpoint(self):
         """Query the voltage set point of the switchboard"""
         return self._cast_int(self.send_query("QVset"))
 
+    @_assert_success
     def set_voltage(self, target_voltage, block_until_set=False, block_until_reached=False):  # sets the output voltage
         """
         Sets the output voltage.
@@ -442,8 +507,8 @@ class Switchboard:
         current_setpoint = -1
         while current_setpoint != target_voltage:
             res = self._cast_int(self.send_query("SVset {:.0f}".format(target_voltage)))
-            msg = "Voltage set to {} V. Previously {} V. Response: {}"
-            self.logging.info(msg.format(target_voltage, current_setpoint, res))
+            self.logging.info("Voltage set to {} V".format(target_voltage))
+            self.logging.debug("Previous target {} V. Response: {}".format(current_setpoint, res))
             if not block_until_set:  # don't wait, return immediately
                 return res == target_voltage
 
@@ -480,6 +545,7 @@ class Switchboard:
 
         return True  # if we reached here, it must have been set correctly
 
+    @_assert_success
     def set_voltage_no_overshoot(self, target_voltage):
         """
         Sets the output voltage to the specified value, but does so more slowly in several steps to ensure that there
@@ -498,6 +564,7 @@ class Switchboard:
         # at then end, make sure to set it to the target voltage
         return self.set_voltage(target_voltage, block_until_reached=True)
 
+    @_assert_success
     def get_current_voltage(self, from_buffer_if_available=True):
         """
         Read the current voltage from the switchboard
@@ -526,8 +593,6 @@ class Switchboard:
         """Disable high voltage output by switching the OCs and H-bridge off"""
         self.set_HB_mode(Switchboard.MODE_OFF)
         self.set_OC_mode(Switchboard.MODE_OFF)
-        if not self.is_output_enabled():
-            self.logging.warning("HV output is currently disabled. Set the output switch to ON to activate HV output!")
 
     def get_name(self):
         """Queries name of the board"""
@@ -559,11 +624,7 @@ class Switchboard:
 
     def get_pid_gains(self):
         self.logging.debug("Querying PID gains")
-        res = self.send_query("QKp")
-        if "," in res:  # v1: always returns all three gains
-            res = res.split(",")
-        else:  # v2: need to query each gain individually
-            res = [res, self.send_query("QKi"), self.send_query("QKd")]
+        res = [self.send_query("QKp"), self.send_query("QKi"), self.send_query("QKd")]
         res = [self._cast_float(s) for s in res]
         return res
 
@@ -582,6 +643,7 @@ class Switchboard:
                 self.send_query("SK{} {:.4f}".format(pid[k], gains[k]))
         return self.get_pid_gains() == gains
 
+    @_assert_success
     def set_relays_on(self, relays=None):
         """
         Switch the requested relays on. If not specified, all relays are switched on.
@@ -589,59 +651,32 @@ class Switchboard:
         :return: The the updated relay state returned by the switchboard
         """
         if relays is None:
-            self.logging.info("Set all relays on")
-            self.relay_state = [1] * 6
-            self.relay_mode = 1
-            res = self.send_query("SRelOn")
-            res = self._parse_relay_state(res)[1] == self.relay_state  # check if all are on
-        else:
-            if self.firmware_version < 20:  # v1
-                res = True
-                for i in relays:
-                    rres = self.set_relay_state(i, 1)
-                    if rres is False:  # if any one failed, the operation was not successful
-                        res = False
-            else:
-                self.logging.warning("Switching individual relays is not supported in v2. Use selective auto mode!")
-                res = False
-        return res
+            relays = list(range(6))  # all relays on
 
-    def set_relays_off(self, relays=None):
+        self.logging.info("Set relays on: {}".format(relays))
+        rel_bin = [int(i in relays) for i in range(6)]  # get desired state (0/1) for each relay
+        self.relay_state = rel_bin
+        self.relay_mode = 1
+        # compose string of which relays to switch on
+        rel_str = ""
+        for rel in rel_bin:
+            rel_str += str(rel)
+        res = self.send_query("SROn " + rel_str)
+        return self._parse_relay_state(res) == self.relay_state  # check if all are on
+
+    @_assert_success
+    def set_relays_off(self):
         """
-        Switch the requested relays off. If not specified, all relays are switched off.
-        :param relays: A list of indices specifying which relays to switch off
+        Switch all relays off.
         :return: True, if the relay state was set successfully
         """
-        if relays is None:
-            self.logging.info("Set all relays off")
-            self.relay_state = [0] * 6
-            self.relay_mode = 0
-            res = self.send_query("SRelOff")
-            res = self._parse_relay_state(res)[1] == self.relay_state  # check if all are off
-        else:
-            if self.firmware_version < 20:  # v1
-                res = True
-                for i in relays:
-                    rres = self.set_relay_state(i, 0)
-                    if rres is False:  # if any one failed, the operation was not successful
-                        res = False
-            else:
-                self.logging.warning("Switching individual relays is not supported in v2. Use selective auto mode!")
-                res = False
-        return res
+        self.logging.info("Set all relays off")
+        self.relay_state = [0] * 6
+        self.relay_mode = 0
+        res = self.send_query("SROff")
+        return self._parse_relay_state(res) == self.relay_state  # check if all are off
 
-    def set_relay_state(self, relay, state):
-        """Only supported by v1!"""
-        self.relay_state[relay] = state
-        if state is 0:
-            self.logging.debug("Setting relay {} off".format(relay))
-            self.send_query("SRelOff {:d}".format(relay))
-        else:  # state is 1
-            self.logging.debug("Setting relay {} on".format(relay))
-            self.send_query("SRelOn {:d}".format(relay))
-        res = self.get_relay_state(from_buffer_if_available=False)
-        return res[relay] == state
-
+    @_assert_success
     def get_relay_state(self, from_buffer_if_available=True):
         """
         Queries the on/off state of the relais
@@ -655,18 +690,10 @@ class Switchboard:
                     return rs
 
         self.logging.debug("Querying relay state")
-        res = self._parse_relay_state(self.send_query("QRelState"))
-        return res[1]
+        res = self._parse_relay_state(self.send_query("QRState"))
+        return res
 
-    def get_relay_mode(self):
-        """
-        Queries the mode of the relais: 0 - all off; 1 - all on; 3 - auto mode
-        :return: The current mode of the relays (int in range [0 3])
-        """
-        self.logging.debug("Querying relay mode")
-        res = self._parse_relay_state(self.send_query("QRelState"))
-        return res[0]
-
+    @_assert_success
     def set_relay_auto_mode(self, reset_time=0, relays=None):
         """
         Enable the automatic short circuit detection and isolation function of the switchboard
@@ -689,9 +716,9 @@ class Switchboard:
         msg = "Enabling auto mode with timeout {} s for channels {} (DEAs: {})".format(reset_time, rel_str, relays)
         self.logging.info(msg)
 
-        self.send_query("SRelAuto {:.0f} {}".format(reset_time, rel_str))  # SRelAuto doesn't return a readable message
-        res = self.get_relay_state(False)
-        return res == rel_bin  # need to query relay state separately to see if it got set correctly
+        res = self.send_query("SRAuto {:.0f} 1 {}".format(reset_time, rel_str))  # SRAuto returns the relay state
+        res = self._parse_relay_state(res)
+        return res == rel_bin  # check if it got set correctly
 
     def is_testing(self):
         """
@@ -699,9 +726,15 @@ class Switchboard:
         :return: True, if the switchboard is currently busy testing
         """
         self.logging.debug("Querying if switchboard is testing")
-        res = self.send_query("QTestingShort")
-        return res == "1"
+        res = self.send_query("QTest")
+        if res == "1":
+            return True
+        elif res == "0":
+            return False
+        else:  # didn't get a valid reply
+            return None
 
+    @_assert_success
     def get_OC_state(self, from_buffer_if_available=True):
         """Query the optocoupler state of the switchboard"""
 
@@ -727,10 +760,11 @@ class Switchboard:
             return [-1, -1]
 
     def get_OC_mode(self, from_buffer_if_available=True):
-        """Query the optocoupler switching mode of the switchboard: OFF-GND=0, HV-DC=1, HV-AC=4, OFF-HIGHZ=3"""
+        """Query the optocoupler switching mode of the switchboard: MANUAL=0, AC=1"""
         ocs = self.get_OC_state(from_buffer_if_available)
         return ocs[0]
 
+    @_assert_success
     def set_OC_mode(self, oc_mode):
         """
         Set the optocoupler switching mode of the switchboard.
@@ -750,6 +784,7 @@ class Switchboard:
             res = self._cast_int(self.send_query("SOC {}".format(oc_mode)))
             return res == oc_mode
 
+    @_assert_success
     def set_OC_frequency(self, oc_freq, reset_cycle_counter=False):
         """
         Set the optocoupler switching frequency of the switchboard.
@@ -765,7 +800,7 @@ class Switchboard:
 
         self.oc_freq = oc_freq  # update internal model
         self.oc_mode = Switchboard.MODE_AC  # indicate that AC mode is enabled
-        res = self._cast_int(self.send_query("SOCF {:.4f}".format(oc_freq)))
+        res = self._cast_float(self.send_query("SOCF {:.4f}".format(oc_freq)))
         self.t_oc_cycle_counter = time.perf_counter()  # record the time we started AC mode
         if reset_cycle_counter:
             self.oc_cycles = 0.0
@@ -785,6 +820,7 @@ class Switchboard:
 
         return self.oc_cycles
 
+    @_assert_success
     def get_HB_state(self, from_buffer_if_available=True):
         """Query the optocoupler state of the switchboard"""
 
@@ -814,6 +850,7 @@ class Switchboard:
         hbs = self.get_HB_state(from_buffer_if_available)
         return hbs[0]
 
+    @_assert_success
     def set_HB_mode(self, hb_mode):
         """
         Set the H-bridge switching mode of the switchboard.
@@ -832,6 +869,7 @@ class Switchboard:
             res = self._cast_int(self.send_query("SHB {}".format(hb_mode)))
             return res == hb_mode
 
+    @_assert_success
     def set_HB_frequency(self, hb_freq, reset_cycle_counter=False):
         """
         Set the H-bridge switching frequency of the switchboard and start AC mode.
@@ -870,6 +908,27 @@ class Switchboard:
     def is_output_enabled(self):
         """Query if the mechanical switch to enable/disable HV output is on (1) or off (0) or unknown (-1)"""
         return self._cast_int(self.send_query("QEnable"))
+
+    def set_calibration_coefficients(self, C0, C1, C2):
+        res0 = self.send_query("SC0 {}\r".format(C0))
+        res1 = self.send_query("SC1 {}\r".format(C1))
+        res2 = self.send_query("SC2 {}\r".format(C2 * 1000000))
+        return res0 == C0 and res1 == C1 and res2 == C2
+
+    def reset_calibration_coefficients(self):
+        return self.set_calibration_coefficients(0, 1, 0)
+
+    def reboot(self):
+        self.logging.info("Rebooting switchboard")
+        logging.getLogger("Disruption").info("Rebooting switchboard")
+
+        res = self.send_query("Reboot")
+        if res.startswith("Reboot"):
+            time.sleep(0.1)  # reboot should only take 15 ms but let's wait for a bit longer, just to be sure
+            self._reconnect()  # reconnect so everything is back up and running
+            return True
+        else:
+            return False
 
     ###########################################################################
     # continuous reading #####################################################
@@ -1034,7 +1093,7 @@ def test_slow_voltage_rise():
 
 
 def test_switchboard():
-    sb = Switchboard.detect(1)[0]
+    sb = Switchboard.detect()[0]
     sb.open()
     t_start = time.perf_counter()
     sb.set_voltage(500)
@@ -1194,7 +1253,7 @@ def test_switchboard():
 
 
 def test_voltage_sequence():
-    sb = Switchboard.detect(1)[0]
+    sb = Switchboard()
     sb.open()
     buf_length = 100000
     sb.start_continuous_reading(buffer_length=buf_length)
@@ -1241,17 +1300,18 @@ def tune_pid():
     print(name)
     t_start = time.perf_counter()
     sb.start_continuous_reading(reference_time=t_start, buffer_length=100000)
-    Vset = 1500
+    Vset = 2000
     freq = 50
-    samples = [1, 3, 4, 5]
+    samples = [0, 1, 2, 3, 4, 5]
     steps = 3
     wait_period = 3
 
     time.sleep(0.1)
 
-    sb.set_relays_on(samples)  # switch on only the ones we want
+    # sb.set_relays_on(samples)  # switch on only the ones we want
+    sb.set_relays_on()  # switch on all
 
-    sb.set_pid_gains((0.2, 1.0, 0.005))
+    sb.set_pid_gains((0.15, 1.0, 0.000))
     gains = sb.get_pid_gains()
     print("PID gains:", gains)
 
@@ -1276,7 +1336,7 @@ def tune_pid():
     time.sleep(wait_period)
 
     sb.set_OC_mode(Switchboard.MODE_OFF)
-    sb.set_voltage(0.95 * Vset)
+    sb.set_voltage(0.90 * Vset)
     print("Stopped cycling. Switched OC off.")
     time.sleep(1)
 
@@ -1305,7 +1365,9 @@ def tune_pid():
 
     tV, V, Vsp, rel, oc_mode, hb_mode = sb.get_data_buffer()
 
-    v_on = oc_mode[0] > 0
+    oc_mode = oc_mode[:, 0]  # get only mode, not state
+    oc_mode[oc_mode == 4] = 2  # make AC mode == 2 so it's better to plot
+    v_on = oc_mode > 0
     v_real = V * v_on
     vmax = np.amax(v_real)
     ivmax = np.argmax(v_real)
@@ -1317,7 +1379,7 @@ def tune_pid():
     ax1.plot(tV, Vsp, color="C0")
     ax1.plot(tV, V, color="C1")
     ax2 = ax1.twinx()
-    ax2.plot(tV, oc_mode[0], color="C2")
+    ax2.plot(tV, oc_mode, color="C2")
     ax2.set_ylabel("OC on", color="C2")
     ax2.set_yticks([0, 1, 2])
     ax2.set_yticklabels(["Off", "DC", "AC {} Hz".format(freq)])
