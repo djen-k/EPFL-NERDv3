@@ -17,6 +17,41 @@ LIB_VER = "2.0"  # Version of this library
 FIRM_VER = 20  # Firmware version That this library expects to run on the HVPS
 
 
+def _assert_success(func):
+    """
+    Checks each setter and getter function to make sure that the expected response was received.
+    If not successful, diagnosis is performed and the setter function is called repeatedly until it is successful
+    :param func: The setter function to check
+    :return: the wrapped setter function
+    """
+
+    @wraps(func)
+    def wrapped(inst, *args, **kwargs):
+        success = False
+        result = None
+        while not success:
+            result = func(inst, *args, **kwargs)
+            if func.__name__.startswith("set"):  # getter - returns False if not successful
+                success = result
+            else:  # getter - might return False as a legitimate response -> need to check more thoroughly
+                if result is None or result == -1:
+                    success = False
+                elif isinstance(result, list):
+                    success = -1 not in result
+                else:
+                    success = True
+
+            if not success:  # set to diagnosis mode (if not already active) and start diagnosis routine
+                if inst.serial_diagnosis_attempt == -1:
+                    inst.serial_diagnosis_attempt = 0
+                inst.diagnose_comms_failure()
+
+        inst.serial_diagnosis_attempt = -1  # we were successful so  we can turn diagnosis mode off
+        return result
+
+    return wrapped
+
+
 class Switchboard:
     """Class for controlling a NERD Switchboard and HVPS (version 2)"""
 
@@ -61,6 +96,7 @@ class Switchboard:
         self.serial_com_lock = RLock()
 
         self.reconnect_timeout = -1
+        self.serial_diagnosis_attempt = -1  # -1 if not in diagnosis mode, otherwise number of global performed attempts
 
         self.continuous_voltage_reading_flag = Event()
         self.buffer_lock = Lock()
@@ -218,51 +254,52 @@ class Switchboard:
         self.get_OC_cycles()
         self.get_HB_cycles()
 
-        self.ser.close()
-        start = time.perf_counter()
-        while not self.ser.is_open:
-            try:
-                self.ser.open()  # throws exception if unsuccessful
+        with self.serial_com_lock:
+            self.ser.close()
+            start = time.perf_counter()
+            while not self.ser.is_open:
+                try:
+                    self.ser.open()  # throws exception if unsuccessful
 
-                # If no exception was raised, connection must have been successful
-                # resume operation by restoring the previous state
-                self.set_voltage(self.vset)
+                    # If no exception was raised, connection must have been successful
+                    # resume operation by restoring the previous state
+                    self.set_voltage(self.vset)
 
-                if self.relay_mode == 1:
-                    self.logging.info("Switching relays back on after reconnect: {}".format(self.relay_state))
-                    self.set_relays_on()
-                elif self.relay_mode == 3:
-                    self.logging.info("Resuming relay auto mode after reconnect: {}".format(self.relay_state))
-                    self.set_relay_auto_mode(0, np.nonzero(self.relay_state)[0].tolist())
+                    if self.relay_mode == 1:
+                        self.logging.info("Switching relays back on after reconnect: {}".format(self.relay_state))
+                        self.set_relays_on()
+                    elif self.relay_mode == 3:
+                        self.logging.info("Resuming relay auto mode after reconnect: {}".format(self.relay_state))
+                        self.set_relay_auto_mode(0, np.nonzero(self.relay_state)[0].tolist())
 
-                if self.get_HB_mode() != self.hb_mode:  # they don't match so must have been a reset
-                    if self.hb_mode == Switchboard.MODE_AC:  # need to restart AC mode
-                        self.set_HB_frequency(self.hb_freq)  # should resume counting cycles correctly
+                    if self.get_HB_mode() != self.hb_mode:  # they don't match so must have been a reset
+                        if self.hb_mode == Switchboard.MODE_AC:  # need to restart AC mode
+                            self.set_HB_frequency(self.hb_freq)  # should resume counting cycles correctly
+                        else:
+                            self.set_HB_mode(self.hb_mode)
+                    if self.get_OC_mode() != self.oc_mode:  # they don't match so must have been a reset
+                        if self.oc_mode == Switchboard.MODE_AC:  # need to restart AC mode
+                            self.set_OC_frequency(self.oc_freq)  # should resume counting cycles correctly
+                        else:
+                            self.set_OC_mode(self.oc_mode)
+
+                except Exception as ex:
+                    self.logging.debug("Connection error: {}".format(ex))
+                    elapsed = time.perf_counter() - start
+                    if self.reconnect_timeout < 0 or elapsed < self.reconnect_timeout:  # no timeout or not yet expired
+
+                        msg = "Reconnection attempt failed!"
+                        if self.reconnect_timeout == 0:
+                            msg += " Will keep trying for {} s".format(int(round(self.reconnect_timeout - elapsed)))
+                        else:
+                            msg += " Will keep trying..."
+                        self.logging.critical(msg)
+                        self.ser.close()  # close again to make sure it's properly closed before we try again
+                        time.sleep(0.5)
                     else:
-                        self.set_HB_mode(self.hb_mode)
-                if self.get_OC_mode() != self.oc_mode:  # they don't match so must have been a reset
-                    if self.oc_mode == Switchboard.MODE_AC:  # need to restart AC mode
-                        self.set_OC_frequency(self.oc_freq)  # should resume counting cycles correctly
-                    else:
-                        self.set_OC_mode(self.oc_mode)
-
-            except Exception as ex:
-                self.logging.debug("Connection error: {}".format(ex))
-                elapsed = time.perf_counter() - start
-                if self.reconnect_timeout < 0 or elapsed < self.reconnect_timeout:  # no timeout or not yet expired
-
-                    msg = "Reconnection attempt failed!"
-                    if self.reconnect_timeout == 0:
-                        msg += " Will keep trying for {} s".format(int(round(self.reconnect_timeout - elapsed)))
-                    else:
-                        msg += " Will keep trying..."
-                    self.logging.critical(msg)
-                    self.ser.close()  # close again to make sure it's properly closed before we try again
-                    time.sleep(0.5)
-                else:
-                    self.logging.critical("Unable to reconnect! Timeout expired.")
-                    self.close()
-                    return
+                        self.logging.critical("Unable to reconnect! Timeout expired.")
+                        self.close()
+                        return
 
         elapsed = time.perf_counter() - start
         msg = "Switchboard reconnected after {:.1f} s!".format(elapsed)
@@ -365,14 +402,14 @@ class Switchboard:
     def _parse_relay_state(self, str_state):
         if not str_state:
             self.logging.warning("Failed to parse relay state. String is empty!")
-            return None, None  # return None to indicate something is wrong
+            return None  # return None to indicate something is wrong
 
         try:
             state = str_state.split(",")  # split individual states
             state = [self._cast_int(r) for r in state if r]  # convert to int if string is not empty
         except Exception as ex:
             self.logging.warning("Failed to parse relay state: {}. Error: {}".format(str_state, ex))
-            return None, None  # return None to indicate something is wrong
+            return None  # return None to indicate something is wrong
 
         if len(state) == 6:  # output is only valid if there is a state for each relay
             return state
@@ -380,56 +417,35 @@ class Switchboard:
             self.logging.warning("Invalid response. Received {} values instead of 6.".format(len(state)))
             return None
 
-    def diagnose_comms_failure(self, attempt):
+    def diagnose_comms_failure(self):
+        attempt = self.serial_diagnosis_attempt
         self.logging.info("Running diagnosis of serial communication: attempt {}".format(attempt))
-        if attempt == 1:
-            self.logging.info("Resetting serial buffers")
-            self.ser.reset_output_buffer()
-            self.ser.reset_input_buffer()
-        else:  # attempt 2+
-            # Close and reopen serial connection
-            self._reconnect()
-        if attempt > 3:  # already tried rebooting once
-            self.logging.info("Reboot unsuccessful. Waiting 10 s before trying again.")
-            time.sleep(10)
-        if attempt > 2:
-            # reboot switchboard
-            self.reboot()
+        with self.serial_com_lock:
+            if attempt == -1:
+                return  # not in diagnosis mode. perhaps problem was resolved by another thread
+            elif attempt < 3:
+                self.logging.info("Just wait 10 ms and try again...")
+                time.sleep(0.01)
+            elif attempt < 4:
+                self.logging.info("Resetting serial buffers")
+                self.ser.reset_output_buffer()
+                self.ser.reset_input_buffer()
+                time.sleep(0.01)
+            elif attempt < 5:
+                self.logging.info("Reopening serial port")
+                self._reconnect()
+            else:  # attempt 5+
+                if attempt > 5:  # already tried rebooting once
+                    self.logging.info("Reboot unsuccessful. Waiting 10 s before trying again.")
+                    time.sleep(10)
+                # reboot switchboard
+                self.reboot()
+
+        self.serial_diagnosis_attempt += 1
 
     ###########################################################################
     # getters and setters #####################################################
     ###########################################################################
-
-    def _assert_success(func):
-        """
-        Checks each setter and getter function to make sure that the expected response was received.
-        If not successful, diagnosis is performed and the setter function is called repeatedly until it is successful
-        :param func: The setter function to check
-        :return: the wrapped setter function
-        """
-
-        @wraps(func)
-        def wrapped(inst, *args, **kwargs):
-            success = False
-            attempts = 0
-            while not success:
-                if attempts > 0:
-                    inst.diagnose_comms_failure(attempts)
-                result = func(inst, *args, **kwargs)
-                if func.__name__.startswith("set"):  # getter - returns False if the parameter was not set successfully
-                    success = result
-                else:  # getter - might return False as a legitimate response -> need to check more thoroughly
-                    if result is None or result == -1:
-                        success = False
-                    elif isinstance(result, list):
-                        success = -1 not in result
-                    else:
-                        success = True
-                attempts += 1
-
-            return result
-
-        return wrapped
 
     @_assert_success
     def get_maximum_voltage(self):
