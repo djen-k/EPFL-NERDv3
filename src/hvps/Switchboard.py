@@ -110,6 +110,8 @@ class Switchboard:
         self.hb_state_buf = None
         self.relay_state_buf = None
         self.log_file = None  # will be initialized if needed
+        self.log_differential = True  # only write data if something changed
+        self.log_differential_thresholds = [1, 0, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]  # thresholds diff log
         self.log_writer = None  # will be initialized if needed
         self.log_data_fields = ["Time", "Relative time [s]", "Set voltage [V]", "Measured voltage [V]",
                                 "OC mode", "OC state", "HB mode", "HB state",
@@ -974,7 +976,7 @@ class Switchboard:
                 if append:
                     fmode = 'a'  # 'append' will append data from this session to the end of the file (if it exists)
                 else:
-                    fmode = 'w'  # 'write' will overwrite the contents of the existing file (if there is one)
+                    fmode = 'w+'  # 'write' will overwrite the contents of the existing file (if there is one)
                 self.log_file = open(log_file, mode=fmode, newline='')
                 self.log_writer = csv.DictWriter(self.log_file, fieldnames=self.log_data_fields)
                 self.log_writer.writeheader()
@@ -1010,7 +1012,13 @@ class Switchboard:
 
         self.logging.info("HVPS logger thread started")
         log_to_file = self.log_file is not None  # this won't change so we don't need to check on every loop
+        log_diff_thrsh = np.array(self.log_differential_thresholds)
         # self.logging.debug("Saving to file: {}".format(log_to_file))
+        data = []
+        data_np = np.array([])
+        data_prev = None
+        data_np_prev = None
+        write_new = True
 
         if self.t_0 is None:
             t_0 = time.perf_counter()  # Initializing reference time
@@ -1020,13 +1028,50 @@ class Switchboard:
         while not self.continuous_voltage_reading_flag.is_set() and self.is_open:
             # While Flag is not set and HVPS is connected
             # get data
-            c_time = time.perf_counter() - t_0  # Current time (since reference)
             voltage = self.get_current_voltage(False)
             voltage_setpoint = self.get_voltage_setpoint()
             oc_state = self.get_OC_state(False)
             hb_state = self.get_HB_state(False)
             relay_state = self.get_relay_state(False)
+            c_time = time.perf_counter() - t_0  # Current time (since reference) in seconds
             # self.logging.debug("Logger thread: Data received")
+            # write data to log file
+            if log_to_file:
+                if relay_state is None:
+                    relay_state = [-1] * 6
+                    # self.logging.debug("Logger thread: Invalid relay state ('None')")
+                data = [datetime.now(), c_time, voltage_setpoint, voltage, *oc_state, *hb_state, *relay_state]
+
+                if self.log_differential:
+                    data_np = np.array(data[1:])
+                    if data_np_prev is None:
+                        write_new = True  # this is the first entry, definitely should be written
+                        write_prev = False  # no previous entry to write
+                    else:
+                        # check if new data is different
+                        is_different = np.abs(data_np_prev - data_np) > log_diff_thrsh
+                        data_is_different = np.any(is_different[1:])
+                        time_is_different = is_different[0]
+                        # check if previous data point should be logged:
+                        # if new data gets written and old data has not already been written, write old data
+                        # if data is same but time elapsed, write new but not old
+                        write_prev = data_is_different and not write_new
+                        write_new = data_is_different or time_is_different
+                else:  # Full logging
+                    write_new = True  # always write new entry
+                    write_prev = False  # never write previous entry
+
+                with self.log_lock:
+                    if write_prev:
+                        row = dict(zip(self.log_data_fields, data_prev))
+                        self.log_writer.writerow(row)
+                    if write_new:
+                        row = dict(zip(self.log_data_fields, data))
+                        self.log_writer.writerow(row)
+                        data_np_prev = data_np  # remember the last data that was written so we can know when it changed
+                    # self.logging.debug("Logger thread: Data written to file".format(len(self.voltage_buf)))
+
+                data_prev = data
             # store data in buffer
             with self.buffer_lock:  # acquire lock for data manipulation
                 self.time_buf.append(c_time)
@@ -1036,21 +1081,14 @@ class Switchboard:
                 self.hb_state_buf.append(hb_state)
                 self.relay_state_buf.append(relay_state)
                 # self.logging.debug("Logger thread: Data stored in buffer (length: {})".format(len(self.voltage_buf)))
-            # write data to log file
-            if log_to_file:
-                with self.log_lock:
-                    if relay_state is None:
-                        relay_state = [-1] * 6
-                        self.logging.debug("Logger thread: Invalid relay state ('None')")
-                    data = [datetime.now(), c_time, voltage_setpoint, voltage, *oc_state, *hb_state, *relay_state]
-                    row = dict(zip(self.log_data_fields, data))
-                    self.log_writer.writerow(row)
-                    # self.logging.debug("Logger thread: Data written to file".format(len(self.voltage_buf)))
 
         self.logging.info("Logger thread exiting")
         # close log file when we're done
         if log_to_file:
             with self.log_lock:
+                if not write_new:  # the last data point has not been written
+                    row = dict(zip(self.log_data_fields, data))
+                    self.log_writer.writerow(row)
                 self.log_writer.writerow({})
                 self.log_file.flush()
                 self.log_file.close()
@@ -1109,22 +1147,30 @@ def test_slow_voltage_rise():
 
 
 def test_switchboard():
-    sb = Switchboard.detect()[0]
+    sb = Switchboard()
     sb.open()
+    sb.start_continuous_reading(log_file="HVPS log.csv", append=False)
     t_start = time.perf_counter()
     sb.set_voltage(500)
+    time.sleep(2)
+    sb.set_voltage(1500)
+    time.sleep(2)
     sb.set_relay_auto_mode()
-    time.sleep(1)
-    sb.set_relay_auto_mode(0, [0, 1, 2])
-    time.sleep(1)
-    sb.set_relay_auto_mode(0, [3, 4, 5])
-    time.sleep(1)
-    sb.set_relay_auto_mode(0, [0, 2, 4])
-    time.sleep(1)
-    sb.set_relays_on()
-    time.sleep(1)
+    time.sleep(4)
+    # sb.set_relay_auto_mode(0, [0, 1, 2])
+    # time.sleep(1)
+    # sb.set_relay_auto_mode(0, [3, 4, 5])
+    # time.sleep(1)
+    # sb.set_relay_auto_mode(0, [0, 2, 4])
+    # time.sleep(1)
+    # sb.set_relays_on()
+    # time.sleep(1)
     sb.set_relays_off()
+    time.sleep(1)
+    sb.set_voltage(0)
+    time.sleep(2.7)
     print(sb.get_current_voltage())
+    sb.close()
     return
     sb.start_continuous_reading(reference_time=t_start, log_file="voltage log.csv", append=False)
     Vset = 450
