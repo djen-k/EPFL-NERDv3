@@ -123,8 +123,6 @@ class NERD:
             session_name += " " + self.config["title"]
         dir_name = "output/{}".format(session_name)
 
-        cap = self.image_cap  # get image capture
-
         # create an image saver for this session to store the recorded images
         imsaver = ImageSaver(dir_name, self.active_dea_indices, save_result_images=True)
 
@@ -210,6 +208,8 @@ class NERD:
         failed_deas = []
         cycles_completed = 0
         ac_paused = False  # indicated if cycling is currently paused (for measurement or breakdown detection)
+        imgs = None
+        outlier_prev = np.array([False] * self.n_deas)
 
         # record start time
         now = time.perf_counter()
@@ -408,7 +408,26 @@ class NERD:
                         leakage_buf.append(leakage_current)  # append to buffer so we can average when we write the data
 
                 # capture images
-                self.image_cap.grab_images()  # tell each camera to grab a frame - will only be retrieved if needed
+                imgs = self.image_cap.read_images()[1]  # get only the images, not the success flags
+                # check if there are outliers (large image deviation) and try to recapture
+                # if it's due to a glitch, we can hopefully get a good image within a few tries
+                img_dev = self.strain_detector.get_deviation_from_reference(imgs)
+                outlier = np.array(img_dev) > self.strain_detector.image_deviation_threshold
+                new_outlier = np.bitwise_and(outlier, np.bitwise_not(outlier_prev))
+                if any(new_outlier):
+                    new_outlier_idx = np.nonzero(new_outlier)[0]
+                    self.logging.debug("New outlier images: {}".format)
+                    for i in new_outlier_idx:
+                        counter = 0
+                        while outlier[i]:
+                            imgs[i] = self.image_cap.read_single_image(i)
+                            dev = self.strain_detector.get_deviation_from_reference_single(imgs[i], i)
+                            outlier[i] = dev > self.strain_detector.image_deviation_threshold
+                            counter += 1
+                            if counter > 5:
+                                self.logging.debug("5 bad images in a row. Probably not a glitch then...")
+                                break
+                outlier_prev = outlier
 
                 # record time spent at high voltage
                 V_high = abs(measured_voltage - max_voltage) < 50  # 50 V margin around max voltage counts as high
@@ -462,7 +481,7 @@ class NERD:
                 if self.daq is not None:  # perform electrical measurements if possible
 
                     if not reverse_polarity_mode:
-                        # measure resistance
+                        # --- measure resistance ----------------------------------------------------
                         res_raw = {}  # empty dict to store raw resistance measurement data
                         Rdea = self.daq.measure_DEA_resistance(self.active_dea_indices,  # 1-D np array
                                                                n_measurements=1, nplc=1,
@@ -481,8 +500,8 @@ class NERD:
                                 self.logging.warning("Couldn't calculate series resistance. Error: {}".format(ex))
                                 R_series = None
 
-                    # TODO: deal with current measurements in reverse polarity mode
-                    # aggregate current measurements
+                    # TODO: fix current measurements in reverse polarity mode
+                    # --- aggregate current measurements -------------------------------------------
                     if ac_active or len(leakage_buf) == 0:
                         # can't use buffered measurements in AC mode since they might have been taken while switching
                         self.logging.debug("no leakage measurements in buffer. recording new one...")
@@ -537,7 +556,7 @@ class NERD:
                     res_img_labels = [label] * self.n_deas
 
                 # retrieve the images that were grabbed earlier
-                imgs = cap.retrieve_images()[1]  # get only the images, not the success flags
+                # imgs = self.image_cap.retrieve_images()[1]  # no longer doing grab and retrieve separately
                 # measure strain and get result images
                 strain_res = self.strain_detector.get_dea_strain(imgs, True, True, res_img_labels)
                 strain, center_shifts, res_imgs, dea_state_vis = strain_res

@@ -62,6 +62,13 @@ class StrainDetector:
         else:
             return [get_image_deviation(img, ref) for img, ref in zip(images, self._reference_images)]
 
+    def get_deviation_from_reference_single(self, img, idx):
+        if self._reference_images is None:
+            self.logging.debug("No reference set, therefore deviation is 0.")
+            return 0
+        else:
+            return get_image_deviation(img, self._reference_images[idx])
+
     def get_dea_strain(self, imgs, output_result_image=False, check_visual_state=False, title="", parallel=True):
         """
         Detect strain for the given set of images.
