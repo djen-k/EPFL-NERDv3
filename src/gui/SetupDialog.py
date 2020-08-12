@@ -148,11 +148,20 @@ class SetupDialog(QtWidgets.QDialog):
         # textbox to set a title/label/description for the test
         self.test_title = QtWidgets.QLineEdit()
         form_parameters.addRow("Title:", self.test_title)
+        if "title" in self._defaults:
+            self.test_title.setText(self._defaults["title"])
 
         # checkbox to enable AC mode
         self.chk_ac = QtWidgets.QCheckBox("AC mode")
         self.chk_ac.clicked.connect(self.chkACClicked)
         form_parameters.addRow("", self.chk_ac)
+
+        # checkbox to enable reverse polarity mode
+        self.chk_reverse_polarity = QtWidgets.QCheckBox("Reverse polarity")
+        # self.chk_ac.clicked.connect(self.chkACClicked)
+        form_parameters.addRow("", self.chk_reverse_polarity)
+        msg = "Polarity will be reversed after each\nmeasurement in the HIGH phase."
+        form_parameters.addRow("", QtWidgets.QLabel(msg))
 
         # create ramp step selector
         self.num_steps = self.create_num_selector(0, 100, "steps", 10)
@@ -359,6 +368,13 @@ class SetupDialog(QtWidgets.QDialog):
         self.chk_ac.setChecked(checked)
         self.chkACClicked()  # enable/disableAC mode settings and show correct schematic
 
+        # apply default to reverse polarity checkbox
+        if "reverse_polarity" in self._defaults:
+            checked = self._defaults["reverse_polarity"]
+        else:
+            checked = False
+        self.chk_reverse_polarity.setChecked(checked)
+
         # self.setWindowFlags(Qt.Window)
         self.show()
 
@@ -415,6 +431,17 @@ class SetupDialog(QtWidgets.QDialog):
                                           "To start a measurement, please select a switchboard/HVPS!",
                                           QtWidgets.QMessageBox.Ok)
             return
+
+        if self.chk_reverse_polarity.isChecked():
+            res = QtWidgets.QMessageBox.warning(self, "CAUTION: Reverse polarity mode!",
+                                                "CAUTION: Make sure that the setup is wired for reverse polarity mode\n"
+                                                "(resistance board disconnected, current sensing via front panel)!\n"
+                                                "If not wired correctly, reversing polarity "
+                                                "WILL RESULT IN DAMAGE TO THE MULTIMETER!",
+                                                QtWidgets.QMessageBox.Ok | QtWidgets.QMessageBox.Cancel,
+                                                QtWidgets.QMessageBox.Cancel)
+            if res != QtWidgets.QMessageBox.Ok:
+                return
 
         self.accept()
 
@@ -838,6 +865,7 @@ class SetupDialog(QtWidgets.QDialog):
             "ac_mode": self.chk_ac.isChecked(),
             "ac_frequency_hz": self.num_ac_frequency.value(),
             "ac_wait_before_measurement_s": self.num_ac_wait.value(),
+            "reverse_polarity": self.chk_reverse_polarity.isChecked(),
             "average_images": self.num_avg_img.value()
         }
 

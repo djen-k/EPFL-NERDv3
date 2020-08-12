@@ -58,12 +58,12 @@ class Switchboard:
     buffer_length = 1000000
     baudrate = 115200
 
-    # Switching mode constants: off-GND=0, on-DC=1, on-inverse polarity=2, off-high Z=3
+    # Switching mode constants: off-GND=0, on-DC=1, on-inverse polarity=2, off-high Z=3, on-AC=4
     MODE_OFF = 0
     MODE_DC = 1
-    MODE_AC = 4
     MODE_INVERSE = 2  # only applies to H-bridge
     MODE_HIGHZ = 3
+    MODE_AC = 4
 
     # TODO: always record current state and restore after reconnect!
 
@@ -111,7 +111,10 @@ class Switchboard:
         self.relay_state_buf = None
         self.log_file = None  # will be initialized if needed
         self.log_differential = True  # only write data if something changed
-        self.log_differential_thresholds = [1, 0, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]  # thresholds diff log
+        # only entry if voltage changed by more than 10 V
+        # always write one entry if time since last entry is more than 1 s
+        # don't write entry for changes in OC state (since it's either 0 or 1, the difference can never be more than 1)
+        self.log_differential_thresholds = [1, 0, 10, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]  # thresholds for diff log
         self.log_writer = None  # will be initialized if needed
         self.log_data_fields = ["Time", "Relative time [s]", "Set voltage [V]", "Measured voltage [V]",
                                 "OC mode", "OC state", "HB mode", "HB state",
@@ -576,7 +579,7 @@ class Switchboard:
         if dv > 100:  # if increasing by more than a few volts, do it slowly
             for voltage_fraction in [0.7, 0.9]:  # multiple steps up to 1
                 temp_target = round(prev_v + dv * voltage_fraction)
-                if temp_target > self.minimum_voltage:
+                if temp_target >= self.minimum_voltage:
                     self.set_voltage(temp_target, block_until_reached=True)
 
         # at then end, make sure to set it to the target voltage
@@ -599,6 +602,40 @@ class Switchboard:
 
         # if thread not running or nothing in buffer, take normal reading
         return self._cast_int(self.send_query("QVnow"))
+
+    @_assert_success
+    def is_voltage_stable(self):
+        res = self._cast_int(self.send_query("QStable"))
+        if res == 1:
+            return True
+        elif res == 0:
+            return False
+        else:
+            return None  # to signal that query was not successful. A boolean check will treat this as False
+
+    def wait_until_stable(self, timeout=10):
+        """
+        Wait for the voltage to stabilize
+        :param timeout: The maximum time to wait
+        :return: True, if the voltage has stabilized before the timeout elapsed
+        """
+        if self.oc_mode == Switchboard.MODE_AC:
+            self.logging.warning("Waiting for voltage to stabilize while AC mode is active. "
+                                 "Depending on the frequency, the voltage may never stabilize under these conditions")
+
+        if self.vset == 0:
+            self.logging.warning("Waiting or voltage to stabilize but no output voltage is set (0 V).")
+            return True
+
+        t_start = time.perf_counter()
+        while not self.is_voltage_stable():
+            elapsed = time.perf_counter() - t_start
+            if elapsed > timeout:
+                self.logging.warning("Voltage did no stablilize within {} s.".format(timeout))
+                return False
+            time.sleep(0.02)
+
+        return True
 
     def set_output_on(self):
         """Enable high voltage output by switching on the OCs and H-bridge in DC mode"""
@@ -790,10 +827,12 @@ class Switchboard:
         :return: True, if the mode was set correctly
         """
 
-        self.get_OC_cycles()  # this updates the cycles one last time if we are currently in AC mode
+        self.get_OC_cycles()  # this updates the number of cycles (if currently in AC mode) before we change anything
 
         if oc_mode == Switchboard.MODE_AC:
-            if self.oc_freq == 0:
+            if self.oc_mode == Switchboard.MODE_AC:
+                return True  # already in AC mode so nothing to do here
+            elif self.oc_freq == 0:
                 raise Exception("No frequency set. To start AC mode, use set_OC_frequency!")
             else:
                 return self.set_OC_frequency(self.oc_freq)  # start AC mode with previous frequency
@@ -805,7 +844,7 @@ class Switchboard:
     @_assert_success
     def set_OC_frequency(self, oc_freq, reset_cycle_counter=False):
         """
-        Set the optocoupler switching frequency of the switchboard.
+        Set the optocoupler switching frequency and start AC mode.
         :param oc_freq: The OC switching frequency
         :param reset_cycle_counter: Set True to reset the counter of completed cycles to 0 before starting AC mode
         :return: True, if the frequency was set correctly
@@ -826,7 +865,8 @@ class Switchboard:
 
     def get_OC_cycles(self):
         """
-        Get the number of cycles the optocouplers have completed in AC mode.
+        Get the number of cycles the optocouplers have completed in AC mode. This is calculated based on the frequency
+        and duration that AC mode has been active. No query to the Switchboard is made.
         :return: The number of fractional completed cycles (float)
         """
         # update cycles if AC mode is currently on

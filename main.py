@@ -180,6 +180,8 @@ class NERD:
         ac_frequency = self.config["ac_frequency_hz"]
         ac_wait_before_measurement = self.config["ac_wait_before_measurement_s"]
 
+        reverse_polarity_mode = True  # TODO: add gui control and read from user config
+
         # set up state machine #############################################################
 
         # possible states for state machine
@@ -187,6 +189,9 @@ class NERD:
         STATE_RAMP = 1
         STATE_WAITING_HIGH = 2
         STATE_WAITING_LOW = 3
+
+        # H-bridge output modes
+        hb_current_output_mode = Switchboard.MODE_DC  # let's start with positive DC
 
         # initial state
         current_state = STATE_STARTUP  # start with a ramp
@@ -204,7 +209,6 @@ class NERD:
         breakdown_occurred = False
         failed_deas = []
         cycles_completed = 0
-        ac_finished = False  # indicates if the current set of cycles was completed
         ac_paused = False  # indicated if cycling is currently paused (for measurement or breakdown detection)
 
         # record start time
@@ -300,7 +304,7 @@ class NERD:
             # check if state will change at then end of this cycle
             state_changing = new_state is not current_state
             step_changing = new_step is not current_step
-            if state_changing:
+            if state_changing and not ac_paused:
                 msg = "State changing from {} to {}"
                 self.logging.info(msg.format(current_state, new_state))
             elif step_changing:
@@ -428,7 +432,7 @@ class NERD:
                         # turn off so DC voltage can stabilize and we don't overshoot
                         self.hvps.set_OC_mode(Switchboard.MODE_OFF)
                         self.hvps.set_voltage(int(current_target_voltage * 0.9))  # reduce voltage temporarily
-                        time.sleep(1)  # wait for voltage to stabilize
+                        self.hvps.wait_until_stable()
                         # set to DC. number of completed cycles will be remembered
                         self.hvps.set_OC_mode(Switchboard.MODE_DC)
                         self.hvps.set_voltage(current_target_voltage)  # raise voltage back to the target
@@ -449,32 +453,35 @@ class NERD:
                 # Record data: resistance, leakage current
                 # (Images are captured every cycle anyway, so we just need to retrieve them for the analysis)
                 # ------------------------------
-                # TODO: make all measurements fail-safe so the test keeps running if any instrument fails permanently
+                # All measurements are fail-safe so the test keeps running even if an instrument fails permanently
 
+                self.logging.info("Taking new measurement:")
                 self.logging.info("Current voltage: {} V".format(measured_voltage))
                 self.logging.info("DEA state: {}".format(dea_state_el))
 
                 if self.daq is not None:  # perform electrical measurements if possible
 
-                    # measure resistance
-                    res_raw = {}  # empty dict to store raw resistance measurement data
-                    Rdea = self.daq.measure_DEA_resistance(self.active_dea_indices,  # 1-D np array
-                                                           n_measurements=1, nplc=1,
-                                                           out_raw=res_raw)
-                    if Rdea is not None:
-                        self.logging.info("Resistance [kΩ]: {}".format(Rdea / 1000))
-                    else:
-                        self.logging.info("Resistance measurement failed (returned None)")
+                    if not reverse_polarity_mode:
+                        # measure resistance
+                        res_raw = {}  # empty dict to store raw resistance measurement data
+                        Rdea = self.daq.measure_DEA_resistance(self.active_dea_indices,  # 1-D np array
+                                                               n_measurements=1, nplc=1,
+                                                               out_raw=res_raw)
+                        if Rdea is not None:
+                            self.logging.info("Resistance [kΩ]: {}".format(Rdea / 1000))
+                        else:
+                            self.logging.info("Resistance measurement failed (returned None)")
 
-                    # calculate total series resistance of the bottom electrode
-                    if len(res_raw) > 0:  # dict has been populated
-                        try:
-                            I_shunt = res_raw["Vshunt"] / res_raw["Rshunt"]  # current measured through shunt resistor
-                            R_series = res_raw["Vsource"] / I_shunt - res_raw["Rshunt"]
-                        except Exception as ex:
-                            self.logging.warning("Couldn't calculate series resistance. Error: {}".format(ex))
-                            R_series = None
+                        # calculate total series resistance of the bottom electrode
+                        if len(res_raw) > 0:  # dict has been populated
+                            try:
+                                I_shunt = res_raw["Vshunt"] / res_raw["Rshunt"]  # current through shunt resistor
+                                R_series = res_raw["Vsource"] / I_shunt - res_raw["Rshunt"]
+                            except Exception as ex:
+                                self.logging.warning("Couldn't calculate series resistance. Error: {}".format(ex))
+                                R_series = None
 
+                    # TODO: deal with current measurements in reverse polarity mode
                     # aggregate current measurements
                     if ac_active or len(leakage_buf) == 0:
                         # can't use buffered measurements in AC mode since they might have been taken while switching
@@ -489,16 +496,31 @@ class NERD:
                     else:
                         self.logging.info("No leakage current measurement available")
 
+                # --- change polarity if in HIGH phase and reverse polarity is enabled -------------
+                if reverse_polarity_mode and current_state == STATE_WAITING_HIGH and not state_changing:
+                    if hb_current_output_mode == Switchboard.MODE_DC:
+                        hb_current_output_mode = Switchboard.MODE_INVERSE  # switch to negative DC
+                        self.logging.info("Setting H-bridge output to negative DC (reverse polarity)")
+                    else:
+                        hb_current_output_mode = Switchboard.MODE_DC  # set back to positive DC
+                        self.logging.info("Setting H-bridge output to positive DC (normal polarity)")
+                    # when switching polarity, first turn off to avoid exposing sample to overshoot
+                    self.hvps.set_HB_mode(Switchboard.MODE_OFF)
+                    self.hvps.wait_until_stable()  # wait until voltage is stable before switching back on in reverse
+                    self.hvps.set_HB_mode(hb_current_output_mode)
+
                 # --- resume cycling if in AC mode -------------------------------------
                 if ac_paused:
-                    ac_paused = False  # pause has ended in any case
-                    if not ac_finished:
-                        self.hvps.set_OC_mode(Switchboard.MODE_AC)  # set back to AC
-                        self.logging.debug("Measurement complete. Resuming AC cycling.")
-                    else:
-                        self.logging.debug("AC cycling finished before measurement. AC cycling is not resumed.")
+                    ac_paused = False  # we're done with the measurement so pause has ended
+                    self.hvps.set_OC_mode(Switchboard.MODE_AC)  # set back to AC
+                    self.logging.info("Resuming AC cycling")
 
             if measurement_due or breakdown_occurred:  # if breakdown, data from previous cycle is saved
+
+                # record time of measurement (before analysis since it takes some time and should not be included in the
+                # measurement interval)
+                time_last_measurement = time.perf_counter()
+
                 # ------------------------------
                 # Analyze data: images/strain, ... (current and resistance needs no analysis) TODO: partial discharge
                 # ------------------------------
@@ -547,8 +569,6 @@ class NERD:
                                  leakage_cur_avg,
                                  image_saved=image_due)
 
-                time_last_measurement = time.perf_counter()
-
                 # -----------------------
                 # save images
                 # -----------------------
@@ -587,19 +607,21 @@ class NERD:
                 # set voltage for new state
                 current_target_voltage = new_target_voltage
                 self.logging.debug("State changing. Setting voltage to {} V".format(current_target_voltage))
-                ret = self.hvps.set_voltage_no_overshoot(current_target_voltage)
-                if ret is not True:
-                    self.logging.warning("Failed to set voltage")
-
+                # self.hvps.set_voltage_no_overshoot(current_target_voltage)
+                self.hvps.set_voltage(current_target_voltage)
                 if new_state == STATE_WAITING_HIGH and ac_mode:
                     self.hvps.set_OC_frequency(ac_frequency)  # this starts AC mode
-                    ac_finished = False
                     ac_active = True
                     ac_paused = False
                     self.logging.debug("Started AC cyling")
                 else:
                     self.hvps.set_OC_mode(Switchboard.MODE_DC)  # anything but high phase in AC mode requires DC
                     ac_active = False
+
+                # whenever we're entering a new state, output mode should be positive DC
+                if hb_current_output_mode != Switchboard.MODE_DC:
+                    self.hvps.set_HB_mode(Switchboard.MODE_DC)
+                    hb_current_output_mode = Switchboard.MODE_DC
 
                 current_state = new_state
                 current_step = new_step
