@@ -158,7 +158,7 @@ class SetupDialog(QtWidgets.QDialog):
 
         # checkbox to enable reverse polarity mode
         self.chk_reverse_polarity = QtWidgets.QCheckBox("Reverse polarity")
-        # self.chk_ac.clicked.connect(self.chkACClicked)
+        self.chk_reverse_polarity.clicked.connect(self.chkRPClicked)
         form_parameters.addRow("", self.chk_reverse_polarity)
         msg = "Polarity will be reversed after each\nmeasurement in the HIGH phase."
         form_parameters.addRow("", QtWidgets.QLabel(msg))
@@ -374,6 +374,7 @@ class SetupDialog(QtWidgets.QDialog):
         else:
             checked = False
         self.chk_reverse_polarity.setChecked(checked)
+        self.chkRPClicked()
 
         # self.setWindowFlags(Qt.Window)
         self.show()
@@ -456,6 +457,12 @@ class SetupDialog(QtWidgets.QDialog):
             self.schematic.setPixmap(self.pix_schematic_DC)
         self.updateCycles()
 
+    def chkRPClicked(self):
+        if self.chk_reverse_polarity.isChecked():
+            self.btn_test_res.setText("Measure current")
+        else:
+            self.btn_test_res.setText("Measure resistance")
+
     def refresh_comports(self):
         self.cbb_switchboard.blockSignals(True)  # block signals to avoid excessive reconnecting to the switchboard
         self.cbb_switchboard.clear()  # remove all items
@@ -521,11 +528,18 @@ class SetupDialog(QtWidgets.QDialog):
         self.cbb_daq_changed()  # call DAQ changed once to connect to the newly selected com port
 
     def test_resistance(self):
-        res = self._daq.measure_DEA_resistance(deas=range(6))
-        if res is not None:
-            QtWidgets.QMessageBox.information(self,
-                                              "Resistance measurement results",
-                                              "Measured resistance (kΩ):\n{}".format(res / 1000))
+        if self.chk_reverse_polarity.isChecked():
+            res = self._daq.measure_current(front=True)
+            if res is not None:
+                QtWidgets.QMessageBox.information(self,
+                                                  "Current measurement results",
+                                                  "Measured current (nA):\n{}".format(res * 1000000000))
+        else:
+            res = self._daq.measure_DEA_resistance(deas=range(6))
+            if res is not None:
+                QtWidgets.QMessageBox.information(self,
+                                                  "Resistance measurement results",
+                                                  "Measured resistance (kΩ):\n{}".format(res / 1000))
 
     def cbb_daq_changed(self):
         daq_idx = self.cbb_daq.currentIndex()

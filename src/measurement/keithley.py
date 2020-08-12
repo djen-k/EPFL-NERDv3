@@ -546,7 +546,13 @@ class DAQ6510:
         # return np.array((shunt_res_on, shunt_res_off))
         return None
 
-    def measure_current(self, nplc=1, reconnects=0):
+    def measure_current(self, nplc=1, reconnects=0, front=False):
+        if front:
+            return self.measure_current_front()
+        else:
+            return self.measure_current_back()
+
+    def measure_current_back(self, nplc=1, reconnects=0):
         """
         Take a single current measurement on channel 122. 9V5 supply to shunt resistors is switched off before the
         measurement is taken.
@@ -583,6 +589,49 @@ class DAQ6510:
             self.send_command("ROUT:CLOSe (@112)")  # close relays 112, 113 to connect the relay on the resistance board
             self.send_command("ROUT:CLOSe (@113)")  # this switches off the 9.5V power used for R measurements
             time.sleep(1)  # wait for relay to switch and current to decay
+
+            self.mode = DAQ6510.MODE_SENSE_CURRENT
+
+        # perform a measurement
+        res = self.send_query("READ?")
+        if res is None:
+            return None
+
+        cur = float(res)
+
+        self.logging.debug("Measured current: {} A".format(cur))
+
+        # self.send_command("ROUT:OPEN (@112)")  # open relays 112 and 113 again to switch 9.5V back on
+        # self.send_command("ROUT:OPEN (@113)")
+
+        return cur
+
+    def measure_current_front(self, nplc=1, reconnects=0):
+        """
+        Take a single current measurement on the front input.
+        :param nplc: The length of the measurement in number of power line cycles. Can be fractional.
+        1-5 PLCs gives the lowest noise according to the DAQ6510 manual.
+        :param reconnects: How often tro try reconnecting if the instrument is not connected. Default: 0 (will return
+        None immediately without trying to reconnect)
+        :return: A single current reading in A.
+        """
+
+        # check connection and try reconnecting once if not connected.
+        if not self.is_connected() and (reconnects == 0 or not self.reconnect(attempts=reconnects)):
+            if reconnects > 0:
+                self.logging.warning("No current measurement was taken because the instrument is not connected")
+            return None
+
+        self.logging.debug("Measuring current on front inputs")
+
+        if self.mode != DAQ6510.MODE_SENSE_CURRENT:  # only do setup if required
+            self.logging.debug("Switching to current sensing mode")
+
+            # there is only one front input so no need to select a channel.
+            # self.send_command("*RST")  # make sure we start with default configuration
+            self.send_command("SENS:FUNC 'CURR:DC'")
+            self.send_command("SENS:CURR:DC:NPLC {}".format(nplc))
+            self.send_command("SENS:CURR:DC:RANGe:AUTO ON")  # doesn't take long so might as well
 
             self.mode = DAQ6510.MODE_SENSE_CURRENT
 
@@ -644,8 +693,9 @@ def test_resistance_measurement():
 
 def test_current_measurement_simple():
     daq = DAQ6510(auto_connect=True)
-    res = daq.measure_current(nplc=1)
-    print("Result [mA]:", res * 1000)
+    for i in range(1000):
+        res = daq.measure_current(nplc=1, front=True)
+        print("Result [nA]:", res * 1000000000)
 
 
 def test_current_measurements(nplc=1):
@@ -1404,9 +1454,9 @@ if __name__ == '__main__':
     # n_meas = [10, 135, 440]
     # for n_m, n_plc in zip(n_meas, nplcs):
     #     test_resistance_measurements(n_m, n_plc)
-    logging.basicConfig(level=logging.DEBUG)
-    test_resistance_measurement()
-    # test_current_measurement_simple()
+    # logging.basicConfig(level=logging.DEBUG)
+    # test_resistance_measurement()
+    test_current_measurement_simple()
     # for nplc in [1]:
     #     test_current_measurements(nplc)
     # measure_resistance_sequence()
