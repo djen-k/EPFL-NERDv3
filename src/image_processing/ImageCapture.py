@@ -266,7 +266,8 @@ class ImageCapture:
                 self.logging.warning("No camera with index {} available".format(cam_id))
                 return None
         else:
-            self.logging.warning("Not a valid camera id: {}. Expected string or int!".format(cam_id))
+            msg = "Not a valid camera id: {} (type {}). Expected string or int!"
+            self.logging.warning(msg.format(cam_id, type(cam_id)))
             return None
 
     def find_cameras(self, parallel=True):

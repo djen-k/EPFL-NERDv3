@@ -572,7 +572,7 @@ def get_image_deviation(img1, img2):
     Calculate the per-pixel average difference between the two given images.
     :param img1: The first image to compare
     :param img2: The second image to compare
-    :return: the difference between the images in range 0 to 1, where 0 inidcates that the images are identical.
+    :return: the difference between the images in range 0 to 1, where 0 indicates that the images are identical.
     """
     if img1 is None or img2 is None:
         logger.warning("Image if None, therefore deviation is 0.")

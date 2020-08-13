@@ -114,11 +114,10 @@ class Switchboard:
         # only entry if voltage changed by more than 10 V
         # always write one entry if time since last entry is more than 1 s
         # don't write entry for changes in OC state (since it's either 0 or 1, the difference can never be more than 1)
-        self.log_differential_thresholds = [1, 0, 10, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]  # thresholds for diff log
+        self.log_differential_thresholds = [1, 0, 10, 0, 0, 0, 0, 0, 0, 0, 0]  # thresholds for diff log
         self.log_writer = None  # will be initialized if needed
         self.log_data_fields = ["Time", "Relative time [s]", "Set voltage [V]", "Measured voltage [V]",
-                                "OC mode", "OC state", "HB mode", "HB state",
-                                "Relay 1", "Relay 2", "Relay 3", "Relay 4", "Relay 5", "Relay 6"]
+                                "OC mode", "HB mode", "Relay 1", "Relay 2", "Relay 3", "Relay 4", "Relay 5", "Relay 6"]
         self.log_lock = Lock()
 
     def __del__(self):
@@ -1080,7 +1079,7 @@ class Switchboard:
                 if relay_state is None:
                     relay_state = [-1] * 6
                     # self.logging.debug("Logger thread: Invalid relay state ('None')")
-                data = [datetime.now(), c_time, voltage_setpoint, voltage, *oc_state, *hb_state, *relay_state]
+                data = [datetime.now(), c_time, voltage_setpoint, voltage, oc_state[0], hb_state[0], *relay_state]
 
                 if self.log_differential:
                     data_np = np.array(data[1:])
