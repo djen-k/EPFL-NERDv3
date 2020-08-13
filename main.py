@@ -108,6 +108,7 @@ class NERD:
             if not daq_connected:
                 self.logging.warning("Unable to connect to multimeter! Running test without multimeter.")
                 self.daq = None
+            self.daq.reset()  # reset to make sure we're in default state at the beginning
 
         # init some internal variable
         self.shutdown_flag = False
@@ -182,7 +183,7 @@ class NERD:
         ac_frequency = self.config["ac_frequency_hz"]
         ac_wait_before_measurement = self.config["ac_wait_before_measurement_s"]
 
-        reverse_polarity_mode = True  # TODO: add gui control and read from user config
+        reverse_polarity_mode = self.config["reverse_polarity"]
 
         # set up state machine #############################################################
 
