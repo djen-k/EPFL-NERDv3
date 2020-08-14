@@ -548,9 +548,9 @@ class DAQ6510:
 
     def measure_current(self, nplc=1, reconnects=0, front=False):
         if front:
-            return self.measure_current_front()
+            return self.measure_current_front(nplc, reconnects)
         else:
-            return self.measure_current_back()
+            return self.measure_current_back(nplc, reconnects)
 
     def measure_current_back(self, nplc=1, reconnects=0):
         """
@@ -569,7 +569,7 @@ class DAQ6510:
                 self.logging.warning("No current measurement was taken because the instrument is not connected")
             return None
 
-        self.logging.debug("Measuring current")
+        self.logging.debug("Measuring current on back input")
 
         if self.mode != DAQ6510.MODE_SENSE_CURRENT:  # only do setup if required
             self.logging.debug("Switching to current sensing mode")

@@ -108,6 +108,7 @@ class NERD:
             if not daq_connected:
                 self.logging.warning("Unable to connect to multimeter! Running test without multimeter.")
                 self.daq = None
+            self.daq.reset()  # reset to make sure we're in default state at the beginning
 
         # init some internal variable
         self.shutdown_flag = False
@@ -161,6 +162,10 @@ class NERD:
         # apply user config ######################################################################
 
         max_voltage = self.config["voltage"]
+        if max_voltage > self.hvps.maximum_voltage:
+            msg = "Target voltage is above the maximum voltage of the HVPS. Using the maximum ({} V) instead."
+            self.logging.warning(msg.format(self.hvps.maximum_voltage))
+            max_voltage = self.hvps.maximum_voltage
         min_voltage = self.hvps.minimum_voltage
         nsteps = self.config["steps"]
         if nsteps == 0:
@@ -178,7 +183,7 @@ class NERD:
         ac_frequency = self.config["ac_frequency_hz"]
         ac_wait_before_measurement = self.config["ac_wait_before_measurement_s"]
 
-        reverse_polarity_mode = True  # TODO: add gui control and read from user config
+        reverse_polarity_mode = self.config["reverse_polarity"]
 
         # set up state machine #############################################################
 
@@ -410,7 +415,7 @@ class NERD:
                         leakage_buf.append(leakage_current)  # append to buffer so we can average when we write the data
 
                 # capture images
-                imgs = self.image_cap.read_images()[1]  # get only the images, not the success flags
+                imgs = self.image_cap.read_images()  # get one set of images
                 # check if there are outliers (large image deviation) and try to recapture
                 # if it's due to a glitch, we can hopefully get a good image within a few tries
                 img_dev = self.strain_detector.get_deviation_from_reference(imgs)
@@ -418,17 +423,20 @@ class NERD:
                 new_outlier = np.bitwise_and(outlier, np.bitwise_not(outlier_prev))
                 if any(new_outlier):
                     new_outlier_idx = np.nonzero(new_outlier)[0]
-                    self.logging.debug("New outlier images: {}".format)
+                    self.logging.info("Outliers in new image set: {}".format(new_outlier_idx))
                     for i in new_outlier_idx:
                         counter = 0
-                        while outlier[i]:
-                            imgs[i] = self.image_cap.read_single_image(i)
-                            dev = self.strain_detector.get_deviation_from_reference_single(imgs[i], i)
-                            outlier[i] = dev > self.strain_detector.image_deviation_threshold
+                        idx = int(i)  # to make sure it's a proper int and not some numpy type
+                        while outlier[idx]:
+                            imgs[idx] = self.image_cap.read_single_image(idx)
+                            dev = self.strain_detector.get_deviation_from_reference_single(imgs[idx], idx)
+                            outlier[idx] = dev > self.strain_detector.image_deviation_threshold
                             counter += 1
                             if counter > 5:
-                                self.logging.debug("5 bad images in a row. Probably not a glitch then...")
+                                self.logging.info("5 bad images in a row. Probably not a glitch then...")
                                 break
+                        if counter <= 5:
+                            self.logging.info("Glitched image ({}) successfully recaptured".format(idx))
                 outlier_prev = outlier
 
                 # record time spent at high voltage
@@ -452,7 +460,9 @@ class NERD:
                         # when switching from AC to DC, a voltage spike occurs due to the sudden drop in current
                         # turn off so DC voltage can stabilize and we don't overshoot
                         self.hvps.set_OC_mode(Switchboard.MODE_OFF)
-                        self.hvps.set_voltage(int(current_target_voltage * 0.9))  # reduce voltage temporarily
+                        reduced_V = max(min_voltage, int(current_target_voltage * 0.5))  # don't go below minimum V
+                        self.hvps.set_voltage(reduced_V)  # reduce voltage temporarily
+                        # time.sleep(1)
                         self.hvps.wait_until_stable()
                         # set to DC. number of completed cycles will be remembered
                         self.hvps.set_OC_mode(Switchboard.MODE_DC)
@@ -613,9 +623,9 @@ class NERD:
                 # -----------------------
                 disp_imgs = [cv.resize(ImageCapture.ImageCapture.IMG_NOT_AVAILABLE, preview_image_size,
                                        interpolation=cv.INTER_AREA)] * 6
-                for i in range(6):
-                    if len(res_imgs) > i and res_imgs[i] is not None:
-                        disp_imgs[i] = cv.resize(res_imgs[i], preview_image_size, interpolation=cv.INTER_AREA)
+                for idx in range(6):
+                    if len(res_imgs) > idx and res_imgs[idx] is not None:
+                        disp_imgs[idx] = cv.resize(res_imgs[idx], preview_image_size, interpolation=cv.INTER_AREA)
 
                 sep = np.zeros((preview_image_size[1], 3, 3), dtype=np.uint8)
                 row1 = np.concatenate((disp_imgs[0], sep, disp_imgs[1], sep, disp_imgs[2]), axis=1)
