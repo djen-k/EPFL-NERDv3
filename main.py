@@ -199,7 +199,9 @@ class NERD:
         measured_voltage = 0
         prev_V_high = False
         Rdea = None
-        R_series = None
+        V_shunt = None
+        V_source = None
+        V_DEA = None
         leakage_current = None
         leakage_cur_avg = None
         leakage_buf = []
@@ -230,7 +232,7 @@ class NERD:
         # enable relay auto mode for selected channels
         self.hvps.set_relay_auto_mode(reset_time=0, relays=self.active_dea_indices)
         hvps_log_file = "{}/{} hvps log.csv".format(dir_name, session_name)
-        self.hvps.start_continuous_reading(buffer_length=1, log_file=hvps_log_file)
+        self.hvps.start_continuous_reading(buffer_length=1, reference_time=time_started, log_file=hvps_log_file)
 
         while self.shutdown_flag is not True:
             now = time.perf_counter()
@@ -494,11 +496,14 @@ class NERD:
                         # calculate total series resistance of the bottom electrode
                         if len(res_raw) > 0:  # dict has been populated
                             try:
-                                I_shunt = res_raw["Vshunt"] / res_raw["Rshunt"]  # current through shunt resistor
-                                R_series = res_raw["Vsource"] / I_shunt - res_raw["Rshunt"]
+                                V_shunt = res_raw["Vshunt"]
+                                V_source = res_raw["Vsource"]
+                                V_DEA = res_raw["VDEA"]
                             except Exception as ex:
-                                self.logging.warning("Couldn't calculate series resistance. Error: {}".format(ex))
-                                R_series = None
+                                self.logging.warning("Raw resistance values not available. Error: {}".format(ex))
+                                V_shunt = None
+                                V_source = None
+                                V_DEA = None
 
                     # TODO: fix current measurements in reverse polarity mode
                     # --- aggregate current measurements -------------------------------------------
@@ -585,7 +590,9 @@ class NERD:
                                  strain,
                                  center_shifts,
                                  Rdea,
-                                 R_series,
+                                 V_source,
+                                 V_shunt,
+                                 V_DEA,
                                  leakage_cur_avg,
                                  image_saved=image_due)
 
