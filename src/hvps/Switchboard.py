@@ -604,7 +604,7 @@ class Switchboard:
 
     @_assert_success
     def is_voltage_stable(self):
-        res = self._cast_int(self.send_query("QStable"))
+        res = self._cast_int(self.send_query("QStbl"))
         if res == 1:
             return True
         elif res == 0:
@@ -744,7 +744,7 @@ class Switchboard:
                     return rs
 
         self.logging.debug("Querying relay state")
-        res = self._parse_relay_state(self.send_query("QRState"))
+        res = self._parse_relay_state(self.send_query("QR"))
         return res
 
     @_assert_success
@@ -770,7 +770,7 @@ class Switchboard:
         msg = "Enabling auto mode with timeout {} s for channels {} (DEAs: {})".format(reset_time, rel_str, relays)
         self.logging.info(msg)
 
-        res = self.send_query("SRAuto {:.0f} 1 {}".format(reset_time, rel_str))  # SRAuto returns the relay state
+        res = self.send_query("SRAut {:.0f} 1 {}".format(reset_time, rel_str))  # SRAut returns the relay state
         res = self._parse_relay_state(res)
         return res == rel_bin  # check if it got set correctly
 
@@ -964,7 +964,7 @@ class Switchboard:
 
     def is_output_enabled(self):
         """Query if the mechanical switch to enable/disable HV output is on (1) or off (0) or unknown (-1)"""
-        return self._cast_int(self.send_query("QEnable"))
+        return self._cast_int(self.send_query("QEnbl"))
 
     def set_calibration_coefficients(self, C0, C1, C2):
         res0 = self.send_query("SC0 {}\r".format(C0))
