@@ -12,7 +12,7 @@ from src.image_processing import StrainDetection
 
 class Camera:
 
-    def __init__(self, index, desired_resolution=None, new_image_callback=None):
+    def __init__(self, index, desired_resolution=None, desired_exposure=None, new_image_callback=None):
         self.logging = logging.getLogger("Camera")
 
         # open image capture
@@ -20,6 +20,8 @@ class Camera:
         # set properties
         if desired_resolution is not None:
             self.set_resolution(desired_resolution)
+        if desired_exposure is not None:
+            self.set_exposure(desired_exposure)
 
         self.access_lock = Lock()  # to prevent accessing the same camera from multiple threads
 
@@ -39,9 +41,6 @@ class Camera:
 
     def set_exposure(self, desired_exposure):
         self.cap.set(cv.CAP_PROP_EXPOSURE, desired_exposure)
-
-    def get_auto_exposure(self):
-        print("not implemented yet")
 
     def grab(self):
         """
@@ -133,6 +132,7 @@ class ImageCapture:
         self.auto_reconnect = True
         self.max_reconnect_attempts = 50
         self.max_fps = 0  # unlimited
+        self.exposure = None
 
         # internal variables
         self._cameras = []
@@ -332,7 +332,7 @@ class ImageCapture:
         :return: The camera, if opened successfully.
         """
 
-        cam = Camera(index, self.desired_resolution, self._new_image_callback)
+        cam = Camera(index, self.desired_resolution, self.exposure, self._new_image_callback)
 
         if not cam.isOpened():  # a camera with this index doesn't exist or it is in use
             self.logging.debug("Could not open {} (index {})".format(cam.name, index))
@@ -621,7 +621,16 @@ class ImageCapture:
         except Exception as ex:
             self.logging.error("Exception in capture thread: {}".format(ex))
 
-    def set_fixed_exposure(self):
+    def set_fixed_exposure(self, exposure):
+        """
+        Set exposure of all cameras to the specified fixed value
+        :param exposure: Exposure value in range [0 -12]
+        """
+        self.exposure = exposure
+        for cam in self._cameras:
+            cam.set_exposure(exposure)
+
+    def set_fixed_exposure_auto(self):
         """
         Enable auto exposure on all selected cameras to find the best exposure, then sets these value as the fixed
         exposure for each camera. Because openCV does not return the actual value when auto exposure is enabled,
@@ -704,8 +713,8 @@ class ImageCapture:
         mindev = np.inf
         minexp = 0
         while exposure > -13:
-            print("set exposure to", exposure)
             exposure -= 1
+            print("set exposure to", exposure)
             cap0.set(cv.CAP_PROP_EXPOSURE, exposure)
             print("exposure:", cap0.get(cv.CAP_PROP_EXPOSURE))
             print("auto wb:", cap0.get(cv.CAP_PROP_AUTO_WB))
@@ -746,8 +755,9 @@ if __name__ == '__main__':
     logging.basicConfig(level=logging.DEBUG)
     logging.info("Testing image capture")
 
-    cap = SharedInstance
-    cap.find_cameras()
+    # cap = SharedInstance
+    # cap.find_cameras()
+    ImageCapture().run_test()
     # _avg = cap.read_average_images(10)
     # for _img in _avg:
     #     cv.imshow("Image", _img)

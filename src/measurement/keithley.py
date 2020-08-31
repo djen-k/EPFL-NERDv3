@@ -1033,7 +1033,7 @@ def measure_sequence_all():
     cap.select_cameras(cameras)
     print("cameras found")
     print("setting exposure")
-    cap.set_fixed_exposure()
+    cap.set_fixed_exposure_auto()
     frame_times = []
     frames = []
     lock = Lock()
