@@ -423,8 +423,8 @@ class DAQ6510:
             out_raw["Rshunt"] = Rshunt
             out_raw["VDEA"] = VDEA
 
-        Vshunt[Vshunt < 0.1] = np.nan
-        VDEA[VDEA < 0.1] = np.nan
+        # Vshunt[Vshunt < 0.1] = np.nan
+        # VDEA[VDEA < 0.1] = np.nan
 
         Ishunt = Vshunt / Rshunt
         RDEA = VDEA / Ishunt

@@ -38,7 +38,9 @@ class DataSaver:
             self.dataFields.append("DEA{}_electrical_state".format(i))
             self.dataFields.append("DEA{}_visual_state".format(i))
             self.dataFields.append("DEA{}_resistance".format(i))
-            self.dataFields.append("DEA{}_series_resistance".format(i))
+            self.dataFields.append("DEA{}_V_source".format(i))
+            self.dataFields.append("DEA{}_V_shunt".format(i))
+            self.dataFields.append("DEA{}_V_DEA".format(i))
             self.dataFields.append("DEA{}_strain_area".format(i))
             self.dataFields.append("DEA{}_strain_X".format(i))
             self.dataFields.append("DEA{}_strain_Y".format(i))
@@ -55,7 +57,9 @@ class DataSaver:
             self.units.append("[1: OK, 0: Failed]")
             self.units.append("[1: OK, 0: Failed]")
             self.units.append("[Ohm]")
-            self.units.append("[Ohm]")
+            self.units.append("[V]")
+            self.units.append("[V]")
+            self.units.append("[V]")
             self.units.append("[%]")
             self.units.append("[%]")
             self.units.append("[%]")
@@ -79,7 +83,7 @@ class DataSaver:
     def write_data(self, timestamp, elapsed_time, time_at_max_V, total_cycles, test_state, target_voltage,
                    measured_voltage,
                    electrical_state=None, visual_state=None, strain_AXYa=None, center_shift=None,
-                   resistance=None, series_resistance=None,
+                   resistance=None, V_source=None, V_shunt=None, V_DEA=None,
                    leakage_current=None, pd_freq=None, pd_mag=None, image_saved=False):
 
         data = self.getDictField()
@@ -107,8 +111,12 @@ class DataSaver:
                 data["DEA{}_visual_state".format(disp_id)] = visual_state[i]
             if resistance is not None and i < len(resistance):
                 data["DEA{}_resistance".format(disp_id)] = resistance[i]
-            if series_resistance is not None and i < len(series_resistance):
-                data["DEA{}_series_resistance".format(disp_id)] = series_resistance[i]
+            if V_source is not None and i < len(V_source):
+                data["DEA{}_V_source".format(disp_id)] = V_source[i]
+            if V_shunt is not None and i < len(V_shunt):
+                data["DEA{}_V_shunt".format(disp_id)] = V_shunt[i]
+            if V_DEA is not None and i < len(V_DEA):
+                data["DEA{}_V_DEA".format(disp_id)] = V_DEA[i]
             if strain_AXYa is not None and i < strain_AXYa.shape[0]:
                 data["DEA{}_strain_area".format(disp_id)] = strain_AXYa[i, 0]
                 data["DEA{}_strain_X".format(disp_id)] = strain_AXYa[i, 1]
