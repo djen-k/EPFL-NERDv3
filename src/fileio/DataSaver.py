@@ -31,14 +31,13 @@ class DataSaver:
         # create data fields and header
         self.dataFields = ["timestamp", "elapsed_time", "time_at_max_V", "total_cycles",
                            "test_state", "target_voltage", "measured_voltage",
-                           "leakage_current", "partial_discharge_freq", "partial_discharge_mag"]
+                           "leakage_current", "partial_discharge_freq", "partial_discharge_mag", "V_source"]
 
         for i in active_deas:
             i += 1  # switch to 1-based indexing for user output
             self.dataFields.append("DEA{}_electrical_state".format(i))
             self.dataFields.append("DEA{}_visual_state".format(i))
             self.dataFields.append("DEA{}_resistance".format(i))
-            self.dataFields.append("DEA{}_V_source".format(i))
             self.dataFields.append("DEA{}_V_shunt".format(i))
             self.dataFields.append("DEA{}_V_DEA".format(i))
             self.dataFields.append("DEA{}_strain_area".format(i))
@@ -52,12 +51,13 @@ class DataSaver:
 
         # define units
 
-        self.units = ["[datetime]", "[s]", "[s]", "", "[0: Ramp, 1: High, 2: Low]", "[V]", "[V]", "[A]", "[1/s]", "[A]"]
+        self.units = ["[datetime]", "[s]", "[s]", "",
+                      "[0: Ramp, 1: High, 2: Low]", "[V]", "[V]",
+                      "[A]", "[1/s]", "[A]", "[V]"]
         for i in active_deas:
             self.units.append("[1: OK, 0: Failed]")
             self.units.append("[1: OK, 0: Failed]")
             self.units.append("[Ohm]")
-            self.units.append("[V]")
             self.units.append("[V]")
             self.units.append("[V]")
             self.units.append("[%]")
@@ -103,6 +103,9 @@ class DataSaver:
         if leakage_current is not None:
             data["partial_discharge_mag"] = pd_mag
 
+        if V_source is not None:
+            data["V_source"] = V_source
+
         for i in range(len(self.active_deas)):
             disp_id = self.active_deas[i] + 1
             if electrical_state is not None and i < len(electrical_state):
@@ -111,8 +114,6 @@ class DataSaver:
                 data["DEA{}_visual_state".format(disp_id)] = visual_state[i]
             if resistance is not None and i < len(resistance):
                 data["DEA{}_resistance".format(disp_id)] = resistance[i]
-            if V_source is not None and i < len(V_source):
-                data["DEA{}_V_source".format(disp_id)] = V_source[i]
             if V_shunt is not None and i < len(V_shunt):
                 data["DEA{}_V_shunt".format(disp_id)] = V_shunt[i]
             if V_DEA is not None and i < len(V_DEA):
