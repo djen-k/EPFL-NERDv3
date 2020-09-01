@@ -362,6 +362,9 @@ class Switchboard:
                 if res.startswith("["):  # info/warning/error
                     # TODO: log switchboard messages properly and raise flag in case of warnings
                     self.logging.info("Message from Switchboard: {}".format(res))
+                    if res.startswith("[ERR]"):
+                        self.logging.critical("Fatal error from Switchboard. Shutting down!")
+                        raise RuntimeError("Fatal error from Switchboard. Shutting down!")
 
                     res = self._read_hvps()  # read another line
                 elif res.startswith("Err"):
