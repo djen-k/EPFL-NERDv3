@@ -242,6 +242,7 @@ class NERD:
         self.hvps.set_relay_auto_mode(reset_time=0, relays=self.active_dea_indices)
         hvps_log_file = "{}/{} hvps log.csv".format(dir_name, session_name)
         self.hvps.start_continuous_reading(buffer_length=1, reference_time=time_started, log_file=hvps_log_file)
+        self.hvps.enable_dead_man_switch(5)  # make sure that the HVPS turns off HV output if connection is lost
 
         while self.shutdown_flag is not True:
             now = time.perf_counter()

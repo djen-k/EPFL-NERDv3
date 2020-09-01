@@ -83,6 +83,7 @@ class Switchboard:
         self.oc_mode = 0
         self.hb_freq = 0
         self.hb_mode = 0
+        self.dms = 0
         self.oc_cycles = 0  # number of completed cycles of the optocouplers
         self.t_oc_cycle_counter = 0  # last time the oc cycle count was queried (to calculate no. of cycles since then)
         self.hb_cycles = 0  # number of completed cycles of the H-bridge
@@ -286,6 +287,10 @@ class Switchboard:
                             self.set_OC_frequency(self.oc_freq)  # should resume counting cycles correctly
                         else:
                             self.set_OC_mode(self.oc_mode)
+
+                    # re-enable dead man's switch
+                    if self.dms > 0:
+                        self.enable_dead_man_switch(self.dms)
 
                 except Exception as ex:
                     self.logging.debug("Connection error: {}".format(ex))
@@ -965,6 +970,19 @@ class Switchboard:
     def is_output_enabled(self):
         """Query if the mechanical switch to enable/disable HV output is on (1) or off (0) or unknown (-1)"""
         return self._cast_int(self.send_query("QEnbl"))
+
+    @_assert_success
+    def enable_dead_man_switch(self, timeout):
+        """
+        Enable the dead man's switch function of the switchboard which will disable the HV output if no message from
+        the host computer was received for the duration of the timeout.
+        :param timeout: The duration after which to disabl HV output if no message from the PC was received.
+        :return: True if the timeout was set correctly.
+        """
+        self.dms = timeout
+        self.logging.info("Dead man's switch enabled with timeout {}".format(timeout))
+        res = self._cast_float(self.send_query("SDMS {:.3f}".format(timeout)))
+        return res == timeout
 
     def set_calibration_coefficients(self, C0, C1, C2):
         res0 = self.send_query("SC0 {}\r".format(C0))
