@@ -31,7 +31,7 @@ def _assert_success(func):
         result = None
         while not success:
             result = func(inst, *args, **kwargs)
-            if func.__name__.startswith("set"):  # getter - returns False if not successful
+            if func.__name__.startswith("set"):  # setter - returns False if not successful
                 success = result
             else:  # getter - might return False as a legitimate response -> need to check more thoroughly
                 if result is None or result == -1:
@@ -113,10 +113,10 @@ class Switchboard:
         self.relay_state_buf = None
         self.log_file = None  # will be initialized if needed
         self.log_differential = True  # only write data if something changed
-        # only entry if voltage changed by more than 10 V
+        # only write entry if voltage changed by more than 20 V (to avoid excessive logging while voltage is stable)
         # always write one entry if time since last entry is more than 1 s
         # don't write entry for changes in OC state (since it's either 0 or 1, the difference can never be more than 1)
-        self.log_differential_thresholds = [1, 0, 10, 0, 0, 0, 0, 0, 0, 0, 0]  # thresholds for diff log
+        self.log_differential_thresholds_np = np.array([1, 0, 20, 0, 0, 0, 0, 0, 0, 0, 0])  # thresholds for diff log
         self.log_writer = None  # will be initialized if needed
         self.log_data_fields = ["Time", "Relative time [s]", "Set voltage [V]", "Measured voltage [V]",
                                 "OC mode", "HB mode", "Relay 1", "Relay 2", "Relay 3", "Relay 4", "Relay 5", "Relay 6"]
@@ -255,6 +255,10 @@ class Switchboard:
         msg = "Switchboard lost connection"
         self.logging.info(msg)
         logging.getLogger("Disruption").info(msg)  # log to separate disruption log file
+
+        if self.log_file is not None:
+            self._write_log_file(data=None, forced=True)  # write a line of NaNs in the log file to indicate disruption
+            self.data_np_prev = None  # this makes sure that the next data coming in will be logged in the file
 
         # update the number of cycles if we're in AC mode (this doesn't use serial communication)
         self.get_OC_cycles()
@@ -433,6 +437,29 @@ class Switchboard:
         else:
             self.logging.warning("Invalid response. Received {} values instead of 6.".format(len(state)))
             return None
+
+    def _parse_switching_mode(self, swmode_str):
+        """
+        Convert the OC or HB state reply from the switchboard to a list of two values for mode and state
+        :param swmode_str: the state (OC or HB) in string format as received from the switchboard
+        :return: a list [mode, state], where mode is one of [OFF=0, DC+=1, DC-=2 (H-bridge only), HIGH-Z=3, AC=4]
+        and state is one of [OFF=0, DC+=1, DC-=2 (H-bridge only), HIGH-Z=3]. Unless mode is AC, state and mode will
+        always be identical. Returns [-1, -1] if the input could not be parsed.
+        """
+        try:
+            swmode_str = swmode_str.split(",")
+            if len(swmode_str) == 2:
+                mode = self._cast_int(swmode_str[0])
+                state = self._cast_int(swmode_str[1])
+                if mode == 1:  # AC mode
+                    mode = Switchboard.MODE_AC
+                else:
+                    mode = state  # if in manual (not AC) mode, the current state must reflect the mode
+                return [mode, state]
+        except Exception as ex:
+            self.logging.warning("Failed to parse switching mode: {}. Error: {}".format(swmode_str, ex))
+
+        return [-1, -1]
 
     def diagnose_comms_failure(self):
         attempt = self.serial_diagnosis_attempt
@@ -816,20 +843,10 @@ class Switchboard:
 
         self.logging.debug("Querying OC state")
         res = self.send_query("QOC")
-        res = res.split(",")
-        if len(res) == 2:
-            mode = self._cast_int(res[0])
-            state = self._cast_int(res[1])
-            if mode == 1:  # AC mode
-                mode = Switchboard.MODE_AC
-            else:
-                mode = state  # if in manual (not AC) mode, the current state must reflect the mode
-            return [mode, state]
-        else:
-            return [-1, -1]
+        return self._parse_switching_mode(res)
 
     def get_OC_mode(self, from_buffer_if_available=True):
-        """Query the optocoupler switching mode of the switchboard: MANUAL=0, AC=1"""
+        """Query the optocoupler switching mode of the switchboard: OFF=0, DC=1, AC=4, HIGHZ=3"""
         ocs = self.get_OC_state(from_buffer_if_available)
         return ocs[0]
 
@@ -905,20 +922,10 @@ class Switchboard:
 
         self.logging.debug("Querying HB state")
         res = self.send_query("QHB")
-        res = res.split(",")
-        if len(res) == 2:
-            mode = self._cast_int(res[0])
-            state = self._cast_int(res[1])
-            if mode == 1:  # AC mode
-                mode = Switchboard.MODE_AC
-            else:
-                mode = state  # if in manual (not AC) mode, the current state must reflect the mode
-            return [mode, state]
-        else:
-            return [-1, -1]  # didn't get a valid response
+        return self._parse_switching_mode(res)
 
     def get_HB_mode(self, from_buffer_if_available=True):
-        """Query the optocoupler switching mode of the switchboard: OFF-GND=0, HV-DC=1, HV-AC=4, OFF-HIGHZ=3"""
+        """Query the optocoupler switching mode of the switchboard: OFF-GND=0, DC+=1, DC-=2, HV-AC=4, HIGHZ=3"""
         hbs = self.get_HB_state(from_buffer_if_available)
         return hbs[0]
 
@@ -1079,18 +1086,15 @@ class Switchboard:
 
         self.logging.info("HVPS logger thread started")
         log_to_file = self.log_file is not None  # this won't change so we don't need to check on every loop
-        log_diff_thrsh = np.array(self.log_differential_thresholds)
         # self.logging.debug("Saving to file: {}".format(log_to_file))
-        data = []
-        data_np = np.array([])
-        data_prev = None
-        data_np_prev = None
-        write_new = True
+
+        self.data_prev = None
+        self.data_np_prev = None
+        self.write_new = True
+        data = None
 
         if self.t_0 is None:
-            t_0 = time.perf_counter()  # Initializing reference time
-        else:
-            t_0 = self.t_0
+            self.t_0 = time.perf_counter()  # Initializing reference time
 
         while not self.continuous_voltage_reading_flag.is_set() and self.is_open:
             # While Flag is not set and HVPS is connected
@@ -1100,46 +1104,10 @@ class Switchboard:
             oc_state = self.get_OC_state(False)
             hb_state = self.get_HB_state(False)
             relay_state = self.get_relay_state(False)
-            c_time = time.perf_counter() - t_0  # Current time (since reference) in seconds
+            c_time = time.perf_counter() - self.t_0  # Current time (since reference) in seconds
             # self.logging.debug("Logger thread: Data received")
             self.current_relay_state = relay_state  # update internal model so it can be restored after reconnect
-            # write data to log file
-            if log_to_file:
-                if relay_state is None:
-                    relay_state = [-1] * 6
-                    # self.logging.debug("Logger thread: Invalid relay state ('None')")
-                data = [datetime.now(), c_time, voltage_setpoint, voltage, oc_state[0], hb_state[0], *relay_state]
 
-                if self.log_differential:
-                    data_np = np.array(data[1:])
-                    if data_np_prev is None:
-                        write_new = True  # this is the first entry, definitely should be written
-                        write_prev = False  # no previous entry to write
-                    else:
-                        # check if new data is different
-                        is_different = np.abs(data_np_prev - data_np) > log_diff_thrsh
-                        data_is_different = np.any(is_different[1:])
-                        time_is_different = is_different[0]
-                        # check if previous data point should be logged:
-                        # if new data gets written and old data has not already been written, write old data
-                        # if data is same but time elapsed, write new but not old
-                        write_prev = data_is_different and not write_new
-                        write_new = data_is_different or time_is_different
-                else:  # Full logging
-                    write_new = True  # always write new entry
-                    write_prev = False  # never write previous entry
-
-                with self.log_lock:
-                    if write_prev:
-                        row = dict(zip(self.log_data_fields, data_prev))
-                        self.log_writer.writerow(row)
-                    if write_new:
-                        row = dict(zip(self.log_data_fields, data))
-                        self.log_writer.writerow(row)
-                        data_np_prev = data_np  # remember the last data that was written so we can know when it changed
-                    # self.logging.debug("Logger thread: Data written to file".format(len(self.voltage_buf)))
-
-                data_prev = data
             # store data in buffer
             with self.buffer_lock:  # acquire lock for data manipulation
                 self.time_buf.append(c_time)
@@ -1150,19 +1118,73 @@ class Switchboard:
                 self.relay_state_buf.append(relay_state)
                 # self.logging.debug("Logger thread: Data stored in buffer (length: {})".format(len(self.voltage_buf)))
 
+            # write data to log file
+            if log_to_file:
+                if relay_state is None:
+                    relay_state = [None] * 6  # make sure we have a list we can expand into 6 values
+                # gather data. only log OC and HB mode [off, DC+, DC-, AC], not the actual state
+                data = [datetime.now(), c_time, voltage_setpoint, voltage, oc_state[0], hb_state[0], *relay_state]
+                self._write_log_file(data)
+
         self.logging.info("Logger thread exiting")
         # close log file when we're done
-        if log_to_file:
-            with self.log_lock:
-                if not write_new:  # the last data point has not been written
-                    row = dict(zip(self.log_data_fields, data))
-                    self.log_writer.writerow(row)
-                self.log_writer.writerow({})
-                self.log_file.flush()
-                self.log_file.close()
-                self.log_file = None
-                self.log_writer = None
-                # self.logging.debug("Switchboard log file closed")
+        if log_to_file and not self.write_new:  # the last data point has not been written
+            self._write_log_file(data, forced=True)  # so we should write it before closing
+        with self.log_lock:
+            self.log_file.flush()
+            self.log_file.close()
+            self.log_file = None
+            self.log_writer = None
+            # self.logging.debug("Switchboard log file closed")
+
+    def _write_log_file(self, data, forced=False):
+        """
+        Write Switchboard state to log file
+        :param data: A list containing the data fields to write
+        :param forced: A flag to indicate if the data should be written regardless of if anything changed compared to
+        the previous log entry (in differential logging mode)
+        """
+
+        if self.log_file is None:
+            return  # no file to log to
+
+        if data is None:
+            data = [None] * len(self.log_data_fields)
+
+        if self.log_differential:
+            data_np = np.array(data[1:], dtype=float)
+            if self.data_np_prev is None:
+                self.write_new = True  # this is the first entry, definitely should be written
+                write_prev = False  # no previous entry to write
+            elif forced:
+                write_prev = not self.write_new  # write previous entry if it hasn't already been written
+                self.write_new = True  # definitely write the new entry (since forced is true)
+            else:
+                # check if new data is different
+                is_different = np.abs(self.data_np_prev - data_np) > self.log_differential_thresholds_np
+                data_is_different = np.any(is_different[1:])
+                time_is_different = is_different[0]
+                # check if previous data point should be logged:
+                # if new data gets written and old data has not already been written, write old data
+                # if data is same but time elapsed, write new but not old
+                write_prev = data_is_different and not self.write_new
+                self.write_new = data_is_different or time_is_different
+        else:  # Full logging
+            self.write_new = True  # always write new entry
+            write_prev = False  # never write previous entry
+            data_np = None
+
+        with self.log_lock:
+            if write_prev:
+                row = dict(zip(self.log_data_fields, self.data_prev))
+                self.log_writer.writerow(row)
+            if self.write_new:
+                row = dict(zip(self.log_data_fields, data))
+                self.log_writer.writerow(row)
+                self.data_np_prev = data_np  # remember last data that was written so we know when it changed
+            # self.logging.debug("Logger thread: Data written to file".format(len(self.voltage_buf)))
+
+        self.data_prev = data  # store data so we can write it later if necessary
 
     def get_data_buffer(self, clear_buffer=True, initial_t=None):
         """
@@ -1239,7 +1261,7 @@ def test_switchboard():
     time.sleep(2.7)
     print(sb.get_current_voltage())
     sb.close()
-    return
+    # return
     sb.start_continuous_reading(reference_time=t_start, log_file="voltage log.csv", append=False)
     Vset = 450
     freq = 2

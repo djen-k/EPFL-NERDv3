@@ -74,7 +74,7 @@ def setup(logdir='log', logname='log', minlevelConsole=logging.WARNING, minLevel
     # Set up logging to the logfile.
     filehandler = logging.handlers.RotatingFileHandler(filename=logfile, maxBytes=10 * 1024 * 1024, backupCount=100)
     filehandler.setLevel(minLevelFile)
-    fileformatter = logging.Formatter("[%(asctime)s]\t %(levelname)-8s \t %(name)-20s \t%(message)s")
+    fileformatter = logging.Formatter("[%(asctime)s] \t%(levelname)-8s \t%(name)-20s \t%(threadName)-9s \t%(message)s")
     # fileformatter = logging.Formatter('%(asctime)-s \t%(levelname)-8s \t%(name)-25s \t%(message)s')
     filehandler.setFormatter(fileformatter)
     logger.addHandler(filehandler)
@@ -82,7 +82,7 @@ def setup(logdir='log', logname='log', minlevelConsole=logging.WARNING, minLevel
     # Set up logging to the console.
     streamhandler = logging.StreamHandler(stream=sys.stdout)
     streamhandler.setLevel(minlevelConsole)
-    streamformatter = logging.Formatter('%(levelname)-8s \t%(name)-25s \t%(message)s')
+    streamformatter = logging.Formatter('%(levelname)-8s \t%(name)-20s \t%(threadName)-9s \t%(message)s')
     streamhandler.setFormatter(streamformatter)
     logger.addHandler(streamhandler)
 
