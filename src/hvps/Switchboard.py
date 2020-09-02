@@ -89,7 +89,8 @@ class Switchboard:
         self.hb_cycles = 0  # number of completed cycles of the H-bridge
         self.t_hb_cycle_counter = 0  # last time the hb cycle count was queried (to calculate no. of cycles since then)
         self.relay_mode = 0
-        self.relay_state = [0] * 6
+        self.user_relay_state = [0] * 6
+        self.current_relay_state = [0] * 6
         self.pid_gains = [0, 0, 0]
 
         self.ser = serial.Serial()
@@ -271,11 +272,15 @@ class Switchboard:
                     self.set_voltage(self.vset)
 
                     if self.relay_mode == 1:
-                        self.logging.info("Switching relays back on after reconnect: {}".format(self.relay_state))
+                        self.logging.info("Switching relays back on after reconnect: {}".format(self.user_relay_state))
                         self.set_relays_on()
                     elif self.relay_mode == 3:
-                        self.logging.info("Resuming relay auto mode after reconnect: {}".format(self.relay_state))
-                        self.set_relay_auto_mode(0, np.nonzero(self.relay_state)[0].tolist())
+                        if self.current_relay_state is None:  # just in case
+                            state = self.user_relay_state
+                        else:
+                            state = self.current_relay_state
+                        self.logging.info("Resuming relay auto mode after reconnect: {}".format(state))
+                        self.set_relay_auto_mode(0, np.nonzero(state)[0].tolist())
 
                     if self.get_HB_mode() != self.hb_mode:  # they don't match so must have been a reset
                         if self.hb_mode == Switchboard.MODE_AC:  # need to restart AC mode
@@ -717,14 +722,15 @@ class Switchboard:
 
         self.logging.info("Set relays on: {}".format(relays))
         rel_bin = [int(i in relays) for i in range(6)]  # get desired state (0/1) for each relay
-        self.relay_state = rel_bin
+        self.user_relay_state = rel_bin
         self.relay_mode = 1
         # compose string of which relays to switch on
         rel_str = ""
         for rel in rel_bin:
             rel_str += str(rel)
         res = self.send_query("SROn " + rel_str)
-        return self._parse_relay_state(res) == self.relay_state  # check if all are on
+        self.current_relay_state = self._parse_relay_state(res)
+        return self.current_relay_state == self.user_relay_state  # check if all are on
 
     @_assert_success
     def set_relays_off(self):
@@ -733,10 +739,11 @@ class Switchboard:
         :return: True, if the relay state was set successfully
         """
         self.logging.info("Set all relays off")
-        self.relay_state = [0] * 6
+        self.user_relay_state = [0] * 6
         self.relay_mode = 0
         res = self.send_query("SROff")
-        return self._parse_relay_state(res) == self.relay_state  # check if all are off
+        self.current_relay_state = self._parse_relay_state(res)
+        return self.current_relay_state == self.user_relay_state  # check if all are off
 
     @_assert_success
     def get_relay_state(self, from_buffer_if_available=True):
@@ -772,15 +779,15 @@ class Switchboard:
         rel_str = ""
         for rel in rel_bin:
             rel_str += str(rel)
-        self.relay_state = rel_bin  # keep state in memory
+        self.user_relay_state = rel_bin  # keep state in memory
         self.relay_mode = 3
 
         msg = "Enabling auto mode with timeout {} s for channels {} (DEAs: {})".format(reset_time, rel_str, relays)
         self.logging.info(msg)
 
         res = self.send_query("SRAut {:.0f} 1 {}".format(reset_time, rel_str))  # SRAut returns the relay state
-        res = self._parse_relay_state(res)
-        return res == rel_bin  # check if it got set correctly
+        self.current_relay_state = self._parse_relay_state(res)  # store the actual state as returned by the SB
+        return self.current_relay_state == rel_bin  # check if it got set correctly
 
     def is_testing(self):
         """
@@ -1061,14 +1068,14 @@ class Switchboard:
         self.reading_thread.start()  # Starting Thread
 
     def stop_voltage_reading(self, wait=False, wait_timeout=1.0):
-        """Routine for stoping continuous position reading"""
+        """Routine for stopping continuous reading"""
         self.continuous_voltage_reading_flag.set()  # Set Flag to False
         # if requested, wait for thread to finish
         if self.reading_thread.is_alive() and wait:
             self.reading_thread.join(wait_timeout)
 
     def _continuous_voltage_reading(self):
-        """Method for continuous reading"""
+        """This is where the continuous reading is performed"""
 
         self.logging.info("HVPS logger thread started")
         log_to_file = self.log_file is not None  # this won't change so we don't need to check on every loop
@@ -1095,6 +1102,7 @@ class Switchboard:
             relay_state = self.get_relay_state(False)
             c_time = time.perf_counter() - t_0  # Current time (since reference) in seconds
             # self.logging.debug("Logger thread: Data received")
+            self.current_relay_state = relay_state  # update internal model so it can be restored after reconnect
             # write data to log file
             if log_to_file:
                 if relay_state is None:

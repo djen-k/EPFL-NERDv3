@@ -28,9 +28,10 @@ def _setup():
         logging.warning("Unable to read config file: {}".format(ex))
         config = {}
 
-    # set fixed exposure to avoid changes in lighting due to auto exposure
-    # TODO: make this an adjustable setting stored in config file
-    ImageCapture.SharedInstance.set_fixed_exposure(-9)
+    # # set fixed exposure to avoid changes in lighting due to auto exposure
+    # # TODO: make this an adjustable setting stored in config file
+    # # TODO: figure out why this didn't work. seems like fixed exposure isn't actually fixed
+    # ImageCapture.SharedInstance.set_fixed_exposure(-10)
 
     # Show setup dialog to get COM port and camera order
     setup_dialog = SetupDialog.SetupDialog(config)
