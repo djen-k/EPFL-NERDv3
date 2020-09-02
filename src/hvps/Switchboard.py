@@ -89,6 +89,9 @@ class Switchboard:
         self.hb_cycles = 0  # number of completed cycles of the H-bridge
         self.t_hb_cycle_counter = 0  # last time the hb cycle count was queried (to calculate no. of cycles since then)
         self.relay_mode = 0
+        self.relay_auto_reconnect = False
+        self.relay_keep_faulty_channels_off = False
+        self.relay_reset_timeout = 0
         self.user_relay_state = [0] * 6
         self.current_relay_state = [0] * 6
         self.pid_gains = [0, 0, 0]
@@ -284,7 +287,10 @@ class Switchboard:
                         else:
                             state = self.current_relay_state
                         self.logging.info("Resuming relay auto mode after reconnect: {}".format(state))
-                        self.set_relay_auto_mode(0, np.nonzero(state)[0].tolist())
+                        self.set_relay_auto_mode(self.relay_auto_reconnect,
+                                                 self.relay_keep_faulty_channels_off,
+                                                 self.relay_reset_timeout,
+                                                 np.nonzero(state)[0].tolist())
 
                     if self.get_HB_mode() != self.hb_mode:  # they don't match so must have been a reset
                         if self.hb_mode == Switchboard.MODE_AC:  # need to restart AC mode
@@ -790,9 +796,13 @@ class Switchboard:
         return res
 
     @_assert_success
-    def set_relay_auto_mode(self, reset_time=0, relays=None):
+    def set_relay_auto_mode(self, auto_reconnect=True, keep_faulty_channels_off=False, reset_time=0, relays=None):
         """
         Enable the automatic short circuit detection and isolation function of the switchboard
+        :param auto_reconnect: If True, the switchboard will test each individual channels after a short circuit was
+        detected and reconnect all channels that don't have a short circuit.
+        :param keep_faulty_channels_off: If True, only the channels which were previously on are tested and channels
+        that were switched off due to a short circuit in the past remain off.
         :param reset_time: An optional time after which to reconnect and test all relays again (including those
         where a short circuit was detected in a previous test). Set 0 to disable.
         :param relays: List of indices (0-5) of the channels to switch on in auto mode
@@ -808,11 +818,15 @@ class Switchboard:
             rel_str += str(rel)
         self.user_relay_state = rel_bin  # keep state in memory
         self.relay_mode = 3
+        self.relay_auto_reconnect = auto_reconnect
+        self.relay_keep_faulty_channels_off = keep_faulty_channels_off
+        self.relay_reset_timeout = reset_time
 
-        msg = "Enabling auto mode with timeout {} s for channels {} (DEAs: {})".format(reset_time, rel_str, relays)
+        msg = "Enabling auto mode for channels {} (DEAs: {})".format(rel_str, relays)
         self.logging.info(msg)
 
-        res = self.send_query("SRAut {:.0f} 1 {}".format(reset_time, rel_str))  # SRAut returns the relay state
+        msg = "SRAut {:d} {:d} {:.0f} {}".format(auto_reconnect, keep_faulty_channels_off, reset_time, rel_str)
+        res = self.send_query(msg)
         self.current_relay_state = self._parse_relay_state(res)  # store the actual state as returned by the SB
         return self.current_relay_state == rel_bin  # check if it got set correctly
 

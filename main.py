@@ -116,7 +116,7 @@ class NERD:
             self.daq.reset()  # reset to make sure we're in default state at the beginning
 
         # init some internal variable
-        self.shutdown_flag = False
+        self.shutdown_flag = 0  # 1 for all samples failed, 2 for user request
 
     def run_nogui(self):
         self.logging.info("Running NERD protocol with {} DEAs: {}".format(self.n_deas, self.active_dea_indices))
@@ -240,12 +240,13 @@ class NERD:
 
         self.hvps.set_HB_mode(1)
         # enable relay auto mode for selected channels
-        self.hvps.set_relay_auto_mode(reset_time=0, relays=self.active_dea_indices)
+        self.hvps.set_relay_auto_mode(auto_reconnect=True, keep_faulty_channels_off=True,
+                                      relays=self.active_dea_indices)
         hvps_log_file = "{}/{} hvps log.csv".format(dir_name, session_name)
         self.hvps.start_continuous_reading(buffer_length=1, reference_time=time_started, log_file=hvps_log_file)
         self.hvps.enable_dead_man_switch(5)  # make sure that the HVPS turns off HV output if connection is lost
 
-        while self.shutdown_flag is not True:
+        while self.shutdown_flag == 0:  # no shutdown requested
             now = time.perf_counter()
             now_tstamp = datetime.now()
 
@@ -379,17 +380,6 @@ class NERD:
                 breakdown_occurred = len(failed_deas) > 0
 
             if breakdown_occurred:
-                # if all relays are off and more than one DEA "failed" at once, it's probably due to a reset
-                # TODO: fix this so we don't get stuck here at the end of a test if multiple DEAs failed at once
-
-                if dea_state_el_new.count(0) == 6 and len(failed_deas) > 1:
-                    # TODO: re-enable only channels that haven't already failed
-                    msg = "All relays are disabled - presumable due to a reset. DEAs will be reconnected: {}"
-                    self.logging.info(msg.format(failed_deas))
-                    # must have been reset. re-enable auto mode
-                    self.hvps.set_relay_auto_mode(reset_time=0, relays=self.active_dea_indices)
-                    continue
-
                 self.logging.info("Breakdown detected! DEAs: {}".format(failed_deas))
                 image_due = True
             else:  # no breakdown
@@ -401,6 +391,10 @@ class NERD:
                 # we don't need the prev DEA state anymore if there was no breakdown (otherwise we need to record it)
                 if dea_state_el_new is not None:
                     dea_state_el = dea_state_el_new
+
+            if dea_state_el_new.count(0) == 6 and not breakdown_occurred:  # second cycle after last DEA has failed
+                self.logging.info("All DEAs have failed. NERD test will be terminated after one last measurement")
+                self.shutdown_flag = 1  # shutdown after all samples failed
 
             ###########################################################################
             # Measurements
@@ -684,7 +678,14 @@ class NERD:
             # ------------------------------
 
             if cv.waitKey(1) & 0xFF == ord('q'):
-                self.shutdown_flag = True
+                self.shutdown_flag = 2  # shutdown by user request
+
+        if self.shutdown_flag == 1:
+            self.logging.info("NERD test halted after all samples failed")
+            self.logging.info("Press any key to exit")
+            cv.waitKey()
+        elif self.shutdown_flag == 2:
+            self.logging.info("NERD test terminated by user")
 
         self.logging.critical("Exiting...")
         self.hvps.set_output_off()
