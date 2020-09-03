@@ -415,7 +415,8 @@ class DAQ6510:
         data = np.reshape(data, (n_measurements, n_deas, 2))
         Vshunt = np.mean(data[:, :, 0], axis=0)
         VDEA = np.mean(data[:, :, 1], axis=0)
-        Rshunt = 100000  # 100kOhm  TODO: read in real calibration data
+        Rshunt = 100000  # 100kOhm
+        # TODO: Resistors are high precision and low thermal drift but would be better to read in real calibration data
 
         if out_raw is not None:  # write measured value to dict so they can be used outside
             out_raw["Vsource"] = Vsource
@@ -423,8 +424,9 @@ class DAQ6510:
             out_raw["Rshunt"] = Rshunt
             out_raw["VDEA"] = VDEA
 
-        # Vshunt[Vshunt < 0.1] = np.nan
-        # VDEA[VDEA < 0.1] = np.nan
+        # apply signal threshold. Less than 1 mV signal can't be accurate (and signal certainly shouldn't be negative)
+        Vshunt[Vshunt < 0.001] = np.nan
+        VDEA[VDEA < 0.001] = np.nan
 
         Ishunt = Vshunt / Rshunt
         RDEA = VDEA / Ishunt
