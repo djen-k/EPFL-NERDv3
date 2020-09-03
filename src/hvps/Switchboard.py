@@ -1162,8 +1162,8 @@ class Switchboard:
         if self.log_file is None:
             return  # no file to log to
 
-        if data is None:
-            data = [None] * len(self.log_data_fields)
+        if data is None:  # create empty list with the current time (abs and rel) at the start
+            data = [datetime.now(), time.perf_counter() - self.t_0, *([None] * len(self.log_data_fields))]
 
         if self.log_differential:
             data_np = np.array(data[1:], dtype=float)
