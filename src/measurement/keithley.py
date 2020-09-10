@@ -548,7 +548,7 @@ class DAQ6510:
         # return np.array((shunt_res_on, shunt_res_off))
         return None
 
-    def measure_current(self, nplc=1, reconnects=0, front=False):
+    def measure_current(self, nplc=1, reconnects=1, front=False):
         if front:
             return self.measure_current_front(nplc, reconnects)
         else:

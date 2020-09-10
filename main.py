@@ -410,8 +410,9 @@ class NERD:
 
                 # measure leakage current
                 if self.daq is not None and not ac_active:
-                    # quick current measurement
-                    leakage_current = self.daq.measure_current(nplc=1, front=reverse_polarity_mode)
+                    # quick current measurement (attempt 1 reconnect if in RP mode, else this is done during R meas)
+                    leakage_current = self.daq.measure_current(nplc=1, front=reverse_polarity_mode,
+                                                               reconnects=int(reverse_polarity_mode))
                     if leakage_current is not None:
                         leakage_buf.append(leakage_current)  # append to buffer so we can average when we write the data
 
@@ -522,7 +523,7 @@ class NERD:
                         # can't use buffered measurements in AC mode since they might have been taken while switching
                         self.logging.debug("no leakage measurements in buffer. recording new one...")
                         # take new measurement
-                        leakage_current = self.daq.measure_current(nplc=5, front=reverse_polarity_mode)
+                        leakage_current = self.daq.measure_current(nplc=5, front=reverse_polarity_mode, reconnects=1)
                         leakage_cur_avg = leakage_current  # nothing to average -> take the newly recorded measurement
                     else:
                         leakage_cur_avg = np.mean(leakage_buf)  # average all current readings since the last time
