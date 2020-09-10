@@ -392,8 +392,9 @@ class NERD:
                 if dea_state_el_new is not None:
                     dea_state_el = dea_state_el_new
 
-            if dea_state_el_new.count(0) == 6 and not breakdown_occurred:  # second cycle after last DEA has failed
-                self.logging.info("All DEAs have failed. NERD test will be terminated after one last measurement")
+            # terminate if it's the second cycle after last DEA has failed
+            if dea_state_el_new.count(0) == 6 and not breakdown_occurred and not measurement_due:
+                self.logging.info("All DEAs have failed. NERD test will be terminated")
                 self.shutdown_flag = 1  # shutdown after all samples failed
 
             ###########################################################################
