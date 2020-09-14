@@ -682,13 +682,6 @@ class NERD:
             if cv.waitKey(1) & 0xFF == ord('q'):
                 self.shutdown_flag = 2  # shutdown by user request
 
-        if self.shutdown_flag == 1:
-            self.logging.info("NERD test halted after all samples failed")
-            self.logging.info("Press any key to exit")
-            cv.waitKey()
-        elif self.shutdown_flag == 2:
-            self.logging.info("NERD test terminated by user")
-
         self.logging.critical("Exiting...")
         self.hvps.set_output_off()
         self.hvps.set_voltage(0, block_until_reached=True)
@@ -697,6 +690,13 @@ class NERD:
         self.logging.critical("Turned voltage off and disconnected relays")
         saver.close()
         self.image_cap.close_cameras()
+
+        if self.shutdown_flag == 1:
+            self.logging.info("NERD test halted after all samples failed")
+            self.logging.info("Press any key to exit")
+            cv.waitKey()
+        elif self.shutdown_flag == 2:
+            self.logging.info("NERD test terminated by user")
 
 
 if __name__ == '__main__':
