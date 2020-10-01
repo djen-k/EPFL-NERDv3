@@ -227,7 +227,7 @@ class SetupDialog(QtWidgets.QDialog):
 
             # add a checkbox to enable or disable each sample
             chk = QtWidgets.QCheckBox("Active")
-            chk.clicked.connect(self.refreshImages)
+            chk.clicked.connect(self.chkActiveClicked)
             if "active_DEAs" in self._defaults:
                 chk.setChecked(self._defaults["active_DEAs"][i] == 1)
             else:
@@ -566,6 +566,27 @@ class SetupDialog(QtWidgets.QDialog):
                 self.btnCaptureClicked()
                 return
 
+    def chkActiveClicked(self):
+
+        if self._strain_detector is not None:
+            sender = self.sender()
+            sender_id = -1
+            for i_dea in range(self._n_deas):
+                if sender == self.chk_active_DEA[i_dea]:
+                    sender_id = i_dea
+                    break
+
+            if sender_id == -1:  # not found. should never happen
+                self.logging.error("Could not determine the sender of the checkbox event")
+                return
+
+            if self.chk_active_DEA[sender_id].isChecked():  # just been switched on -> strain reference no longer valid
+                self.invalidate_strain_reference()
+            else:  # was on, now been switched off  --> keep reference but remove the de-selected sample
+                self._strain_detector.remove_reference(sender_id)
+
+        self.refreshImages()
+
     def btnSelectClicked(self):
         sender = self.sender()
         for i_dea in range(self._n_deas):
@@ -778,19 +799,22 @@ class SetupDialog(QtWidgets.QDialog):
 
             # disable strain display because if the camera selection changes, the strain reference is no longer valid
             if self._strain_detector is not None:
-                self.chkStrain.setEnabled(False)
-                self.chkStrain.setChecked(False)
-                self._strain_detector = None
-                self.lblStrainRef.setText("No strain reference set!")
-                self.lblStrainRef.setStyleSheet("QLabel { color : red }")
-                dtitle = "Strain reference no longer valid"
-                dmsg = "Since the camera order changed, the strain reference is no longer valid!\n" \
-                       "Please set a new strain reference"
-                QtWidgets.QMessageBox.information(self, dtitle, dmsg, QtWidgets.QMessageBox.Ok)
+                self.invalidate_strain_reference()
 
             self.refreshImages()
         except Exception as ex:
             self.logging.error("Exception in combobox callback: {}".format(ex))
+
+    def invalidate_strain_reference(self):
+        self.chkStrain.setEnabled(False)
+        self.chkStrain.setChecked(False)
+        self._strain_detector = None
+        self.lblStrainRef.setText("No strain reference set!")
+        self.lblStrainRef.setStyleSheet("QLabel { color : red }")
+        dtitle = "Strain reference no longer valid"
+        dmsg = "The strain reference is no longer valid.\n" \
+               "Please set a new strain reference!"
+        QtWidgets.QMessageBox.information(self, dtitle, dmsg, QtWidgets.QMessageBox.Ok)
 
     def refreshImages(self):
         self.logging.debug("Recording new set of images")

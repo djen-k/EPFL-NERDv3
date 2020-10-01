@@ -41,6 +41,26 @@ class StrainDetector:
         res = self.get_dea_strain(reference_images, True)
         self._reference_result_images = res[2]
 
+    def remove_reference(self, id_reference):
+        """
+        Remove the specified reference
+        :param id_reference: The index of the reference to remove
+        """
+        if self._reference_images is None:
+            self.logging.error("No strain reference has been set. Nothing to remove!")
+            return
+        if id_reference >= len(self._reference_images):
+            self.logging.error("Invalid reference id! Could not remove the specified reference.")
+            return
+
+        self._reference_images.pop(id_reference)
+        self._exclude_masks.pop(id_reference)
+        self._reference_result_images.pop(id_reference)
+        self._reference_ellipses.pop(id_reference)
+        self._reference_radii = np.delete(self._reference_radii, id_reference, 0)
+        self._reference_centers = np.delete(self._reference_centers, id_reference, 0)
+        self._reference_pseudo_areas = np.delete(self._reference_pseudo_areas, id_reference, 0)
+
     def get_reference_images(self):
         return self._reference_images, self._reference_result_images
 
