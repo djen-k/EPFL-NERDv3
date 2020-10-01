@@ -195,14 +195,14 @@ class Switchboard:
     def open(self, port=None, with_continuous_reading=False, reconnect_timeout=-1):
         """
         Open a connection to a physical switchboard at the given COM port. The port can be specified as a string
-        (COM port name), a HvpsInvo object or an index. If specified as an index, the respective port in this
+        (COM port name), a HvpsInfo object or an index. If specified as an index, the respective port in this
         SwitchBoard's hvps_available_ports list is used. If no port is specified, the first available port is used.
         :param port: The COM port to connect to. Can be a string, HvpsInfo, int or None
         :param with_continuous_reading: Specify if the SwitchBoard should launch a thread to record continuous voltage
         readings
         :param reconnect_timeout: Optional timeout parameter to specify for how long the HVPS should attempt
         reconnecting if the connection is lost. Set -1 to disable (i.e. keep trying to reconnect indefinitely).
-        If the timeout expires before the connection can be reastablished, the COM port is closed but no error
+        If the timeout expires before the connection can be re-established, the COM port is closed but no error
         is generated. Check "is_open" regularly to ensure that the device is still connected.
         """
         if self.is_open:
@@ -270,6 +270,7 @@ class Switchboard:
         with self.serial_com_lock:
             self.ser.close()
             start = time.perf_counter()
+            first_try = True
             while not self.ser.is_open:
                 try:
                     self.ser.open()  # throws exception if unsuccessful
@@ -313,13 +314,15 @@ class Switchboard:
                     if self.reconnect_timeout < 0 or elapsed < self.reconnect_timeout:  # no timeout or not yet expired
 
                         msg = "Reconnection attempt failed!"
-                        if self.reconnect_timeout == 0:
+                        if self.reconnect_timeout > 0:
                             msg += " Will keep trying for {} s".format(int(round(self.reconnect_timeout - elapsed)))
-                        else:
-                            msg += " Will keep trying..."
-                        self.logging.critical(msg)
+                            self.logging.critical(msg)
+                        elif first_try:  # only write message on the first try
+                            msg += " Will keep trying...  If problem persists, disconnect and reconnect the USB!"
+                            self.logging.critical(msg)
+                            first_try = False
                         self.ser.close()  # close again to make sure it's properly closed before we try again
-                        time.sleep(0.5)
+                        time.sleep(1.0)
                     else:
                         self.logging.critical("Unable to reconnect! Timeout expired.")
                         self.close()

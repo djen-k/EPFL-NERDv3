@@ -602,6 +602,7 @@ class SetupDialog(QtWidgets.QDialog):
     def _set_strain_reference(self, images):
         self._strain_detector = StrainDetection.StrainDetector()
         self._strain_detector.set_reference(images)
+        self.logging.debug("Strain reference set successfully")
 
         self.chkStrain.setEnabled(True)
         self.chkStrain.setChecked(True)
@@ -630,8 +631,8 @@ class SetupDialog(QtWidgets.QDialog):
                 except Exception as ex:
                     self.logging.debug("Error loading reference image: {}".format(ex))
 
-        camorder = self.getCamOrder()
-        cams_in_use = len(camorder) - camorder.count(-1)
+        active_samples = self.getActiveSamples()
+        cams_in_use = active_samples.count(1)
         if len(refs) == cams_in_use:
             self._set_strain_reference(refs)
         else:
@@ -792,10 +793,13 @@ class SetupDialog(QtWidgets.QDialog):
             self.logging.error("Exception in combobox callback: {}".format(ex))
 
     def refreshImages(self):
+        self.logging.debug("Recording new set of images")
         images = self._image_capture.get_images_from_buffer()
         order = self.getCamOrder()
         order_filt = [i for i in order if i >= 0]  # filter to remove unused cameras (-1)
         images = [images[i] for i in order_filt]  # put images in the right order
+        active = self.getActiveSamples()
+        active_filt = [active[i] for i in range(self._n_deas) if order[i] >= 0]  # filter to remove unused cameras (-1)
 
         if self.chkStrain.isChecked():
             try:
@@ -804,7 +808,14 @@ class SetupDialog(QtWidgets.QDialog):
             except Exception as ex:
                 self.logging.debug("Couldn't read voltage: {}".format(ex))
                 sv = ""
-            images = self._strain_detector.get_dea_strain(images, True, True, sv)[2]
+            active_images = [images[i] for i in range(len(images)) if active_filt[i]]
+            images_res = self._strain_detector.get_dea_strain(active_images, True, True, sv)[2]
+            # fill in the result images for all active samples
+            k = 0
+            for i in range(len(images)):
+                if active_filt[i]:
+                    images[i] = images_res[k]
+                    k += 1
 
         i_img = 0
         for i_dea in range(self._n_deas):

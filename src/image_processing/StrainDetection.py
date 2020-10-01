@@ -91,6 +91,8 @@ class StrainDetector:
         # TODO: keep old masks if new masks are rubbish
         # TODO: make sure the algorithm is robust to Nones
         if self._reference_images is not None and n_img != len(self._reference_images):
+            # TODO: handle mismatch of images and references better...?
+            self.logging.critical("Number of images does not match the number of reference images!")
             raise Exception("Need to specify one image for each reference image! Set elements to None where no image is"
                             "available for a reference")
 
