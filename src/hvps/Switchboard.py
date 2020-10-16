@@ -241,14 +241,14 @@ class Switchboard:
 
     def close(self):
         """Closes connection with the HVPS"""
-        if self.is_open:
+        if self.reading_thread.is_alive():
             self.stop_voltage_reading(wait=True)
-            if self.ser.is_open:
-                with self.serial_com_lock:
-                    self.set_voltage(0, block_until_set=True)  # set the voltage to 0 as a safety measure
-                    self.set_output_off()  # disable OCs and H-bridge
-                    self.set_relays_off()
-                    self.ser.close()
+        if self.ser.is_open:
+            with self.serial_com_lock:
+                self.set_voltage(0, block_until_set=True)  # set the voltage to 0 as a safety measure
+                self.set_output_off()  # disable OCs and H-bridge
+                self.set_relays_off()
+                self.ser.close()
             # time.sleep(3)  # wait for serial port to properly close
             self.is_open = False
             self.logging.info("Connection to {} closed.".format(self.name))

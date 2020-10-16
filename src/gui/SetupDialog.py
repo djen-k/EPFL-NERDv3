@@ -444,6 +444,7 @@ class SetupDialog(QtWidgets.QDialog):
             if res != QtWidgets.QMessageBox.Ok:
                 return
 
+        self._hvps.close()  # close COM port to make sure it's not blocked
         self.accept()
 
     def chkACClicked(self):
@@ -466,6 +467,9 @@ class SetupDialog(QtWidgets.QDialog):
     def refresh_comports(self):
         self.cbb_switchboard.blockSignals(True)  # block signals to avoid excessive reconnecting to the switchboard
         self.cbb_switchboard.clear()  # remove all items
+
+        # close current connection (if any) to make sure the port is not blocked
+        self._hvps.close()
 
         # list all available com ports
         ports = self._hvps.detect()
