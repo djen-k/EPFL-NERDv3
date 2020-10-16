@@ -613,7 +613,10 @@ class SetupDialog(QtWidgets.QDialog):
         images = cap.read_average_images(self.num_avg_img.value())
         order = self.getCamOrder()
         order_filt = [i for i in order if i >= 0]  # filter to remove unused cameras (-1)
-        images = [images[i] for i in order_filt]  # put image sets in the right order
+        images = [images[i] for i in order_filt]  # put images in the right order
+        active = self.getActiveSamples()
+        active_filt = [active[i] for i in range(self._n_deas) if order[i] >= 0]  # filter to remove unused cameras (-1)
+        images = [images[i] for i in range(len(images)) if active_filt[i]]  # pick only the active samples
 
         self._set_strain_reference(images)
 
@@ -623,7 +626,12 @@ class SetupDialog(QtWidgets.QDialog):
     def _set_strain_reference(self, images):
         self._strain_detector = StrainDetection.StrainDetector()
         self._strain_detector.set_reference(images)
-        self.logging.debug("Strain reference set successfully")
+        self.logging.info("New strain reference has been set.")
+
+        # self.logging.info("Double-checking that the reference is OK: Running strain detection on same set of images")
+        # strain_res = self._strain_detector.get_dea_strain(images, False)[0]
+        # self.logging.info("Strain result:")
+        # self.logging.info("\n{}".format(strain_res))
 
         self.chkStrain.setEnabled(True)
         self.chkStrain.setChecked(True)
