@@ -623,11 +623,14 @@ class NERD:
                 # -----------------------
                 # show images
                 # -----------------------
-                disp_imgs = [cv.resize(ImageCapture.ImageCapture.IMG_NOT_AVAILABLE, preview_image_size,
+                disp_imgs = [cv.resize(ImageCapture.ImageCapture.IMG_NOT_AVAILABLE,
+                                       preview_image_size,
                                        interpolation=cv.INTER_AREA)] * 6
-                for idx in range(6):
+                for idx in range(self.n_deas):
                     if len(res_imgs) > idx and res_imgs[idx] is not None:
-                        disp_imgs[idx] = cv.resize(res_imgs[idx], preview_image_size, interpolation=cv.INTER_AREA)
+                        disp_imgs[self.active_dea_indices[idx]] = cv.resize(res_imgs[idx],
+                                                                            preview_image_size,
+                                                                            interpolation=cv.INTER_AREA)
 
                 sep = np.zeros((preview_image_size[1], 3, 3), dtype=np.uint8)
                 row1 = np.concatenate((disp_imgs[0], sep, disp_imgs[1], sep, disp_imgs[2]), axis=1)

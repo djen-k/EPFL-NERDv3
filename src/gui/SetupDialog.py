@@ -587,7 +587,12 @@ class SetupDialog(QtWidgets.QDialog):
             if self.chk_active_DEA[sender_id].isChecked():  # just been switched on -> strain reference no longer valid
                 self.invalidate_strain_reference()
             else:  # was on, now been switched off  --> keep reference but remove the de-selected sample
-                self._strain_detector.remove_reference(sender_id)
+                active = self.getActiveSamples()
+                ref_id = sender_id
+                for i_dea in range(sender_id):
+                    if not active[i_dea]:
+                        ref_id -= 1
+                self._strain_detector.remove_reference(ref_id)
 
         self.refreshImages()
 
