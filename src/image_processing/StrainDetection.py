@@ -232,6 +232,7 @@ class StrainDetector:
         img_bw = get_binary_image(img, closing_radius=10)
 
         # If no mask is specified, create one with no exclusions
+        self.logging.debug("Mask provided: {}".format(exclude_mask is None))
         if exclude_mask is None:
             # If there is no mask, the algorithm is run once with a blank mask to generate a proper mask.
             # We then run fit ellipse normally to generate the actual fit.
@@ -240,7 +241,8 @@ class StrainDetector:
             # TODO: maybe fix this mask issue at some point but for now we'll just call fit ellipse twice.
             self.logging.debug("No mask provided for ellipse fitting. Running ellipse fit once to generate mask.")
             exclude_mask = np.zeros(img_bw.shape, dtype=np.uint8)
-            ellipse, exclude_mask = self.dea_fit_ellipse(img, exclude_mask)
+            for i in range(3):  # repeat n times to make sure the masks have converged
+                ellipse, exclude_mask = self.dea_fit_ellipse(img, exclude_mask)
 
         # get contours
         cont = find_contour(img_bw)
