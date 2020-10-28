@@ -372,8 +372,6 @@ class NERD:
                 prev_V_high = False  # set to False so the time of the test is not counted as time at high Voltage
 
             dea_state_el_new = self.hvps.get_relay_state()  # check DEA electrical state (can be None if invalid reply)
-            if dea_state_el_new is not None:
-                dea_state_el_new = dea_state_el_new[self.active_dea_indices]  # select only the active channels
 
             # check if samples broke down
             if dea_state_el is not None and dea_state_el_new is not None:
@@ -395,7 +393,8 @@ class NERD:
                     dea_state_el = dea_state_el_new
 
             # terminate if it's the second cycle after last DEA has failed
-            if dea_state_el_new.count(0) == self.n_deas and not breakdown_occurred and not measurement_due:
+
+            if all(el_state == 0 for el_state in dea_state_el_new) and not breakdown_occurred and not measurement_due:
                 self.logging.info("All DEAs have failed. NERD test will be terminated")
                 self.shutdown_flag = 1  # shutdown after all samples failed
 
@@ -599,7 +598,7 @@ class NERD:
                                  current_state,
                                  current_target_voltage,
                                  measured_voltage,
-                                 dea_state_el,
+                                 dea_state_el_selection,
                                  dea_state_vis,
                                  strain,
                                  center_shifts,
