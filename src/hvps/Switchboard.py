@@ -114,7 +114,7 @@ class Switchboard:
         self.oc_state_buf = None
         self.hb_state_buf = None
         self.relay_state_buf = None
-        self.log_file = None  # will be initialized if needed
+        self.log_file = None  # will be initialized when needed
         self.log_differential = True  # only write data if something changed
         # only write entry if voltage changed by more than 20 V (to avoid excessive logging while voltage is stable)
         # always write one entry if time since last entry is more than 1 s

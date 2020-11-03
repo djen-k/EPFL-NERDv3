@@ -19,10 +19,24 @@ class DataSaver:
         # Save parameters
         self.active_deas = active_deas
 
+        # check directory and make sure it exists
+        dir_name = os.path.dirname(outFilename)
+        if not os.path.exists(dir_name):
+            try:
+                os.makedirs(dir_name)
+                self.logging.info("Directory [{}] Created ".format(dir_name))
+            except Exception as ex:
+                self.logging.critical("Failed to create data directory [{}]: {}".format(dir_name, ex))
+                raise ex
+        else:
+            self.logging.debug("Directory [{}] already exists".format(dir_name))
+            pass
+
         # Open file in which we'll write data, avoid deleting data if overWrite is not true
         if os.path.isfile(outFilename) and not overwrite:
             logging.critical("File alreay exists: {}".format(outFilename))
             raise Exception
+        self.logging.info("Opening file: {}".format(outFilename))
         self.file = open(outFilename, mode="w", newline='')
 
         # Mutex to ensure no concurrent write

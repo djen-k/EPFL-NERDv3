@@ -55,6 +55,7 @@ def _setup():
 
 
 class NERD:
+    hvps: Switchboard
 
     def __init__(self, config, strain_detector=None):
         self.logging = logging.getLogger("NERD")
@@ -72,7 +73,7 @@ class NERD:
             cam_order = np.array(config["cam_order"], dtype=int)
             cam_order[~active_deas] = -1  # de-select cameras of disabled samples
             # find the DEAs that have a camera assigned and are enabled
-            active_deas = cam_order > -1  # derive from cam order so any slot that doesn't have a cam is disabled
+            # active_deas = cam_order > -1  # derive from cam order so any slot that doesn't have a cam is disabled
             # convert to list of indices
             cam_order = cam_order.tolist()  # convert to list, just to be sure the ImageCapture can handle it
         else:
@@ -86,6 +87,9 @@ class NERD:
         # apply cam order to image capture so the indices of DEAs and cameras match
         self.image_cap = ImageCapture.SharedInstance
         self.image_cap.select_cameras(cam_order)
+        self.cams_active = self.image_cap.get_camera_count() != 0  # if there are no cameras, proceed without
+        if not self.cams_active:
+            self.logging.info("Running test without strain measurement")
 
         self.strain_detector = strain_detector
         # we don't apply sample selection to strain detector here because we want to save all reference images first
@@ -129,10 +133,6 @@ class NERD:
             session_name += " " + self.config["title"]
         dir_name = "output/{}".format(session_name)
 
-        # create an image saver for this session to store the recorded images
-        imsaver = ImageSaver(dir_name, self.active_dea_indices, save_result_images=True)
-
-        # TODO: handle varying numbers of DEAs
         save_file_name = "{}/{} data.csv".format(dir_name, session_name)
         saver = DataSaver(self.active_dea_indices, save_file_name)
 
@@ -150,18 +150,26 @@ class NERD:
         if not self.strain_detector.has_reference():
             self.strain_detector.set_reference(self.image_cap.read_images())
 
-        ref_imgs, ref_res_imgs = self.strain_detector.get_reference_images()
-        imsaver.save_all(ref_imgs, now_tstamp, ref_res_imgs, suffix="reference")
-        ref_selection = self.active_deas[np.array(self.cam_order) > -1]
-        ref_selection = np.nonzero(ref_selection)[0].tolist()
-        self.strain_detector.select_reference(ref_selection)
+        if self.cams_active:
+            # create an image saver for this session to store the recorded images
+            imsaver = ImageSaver(dir_name, self.active_dea_indices, save_result_images=True)
 
-        time.sleep(1)  # just wait a second so the timestamp for the first image is not the same as the reference
+            ref_imgs, ref_res_imgs = self.strain_detector.get_reference_images()
+            imsaver.save_all(ref_imgs, now_tstamp, ref_res_imgs, suffix="reference")
+            ref_selection = self.active_deas[np.array(self.cam_order) > -1]
+            ref_selection = np.nonzero(ref_selection)[0].tolist()
+            self.strain_detector.select_reference(ref_selection)
+            time.sleep(1)  # just wait a second so the timestamp for the first image is not the same as the reference
+        else:
+            ref_imgs = None
 
         # calculate image size for GUI #######################################################################
 
         # preview_image_size = (720, 405)
-        img_shape = ref_imgs[0].shape
+        if ref_imgs:
+            img_shape = ref_imgs[0].shape
+        else:
+            img_shape = ImageCapture.ImageCapture.IMG_NOT_AVAILABLE.shape
         preview_image_size = Screen.get_max_size_on_screen((img_shape[1], img_shape[0]), (2, 3), (20, 60))
 
         # apply user config ######################################################################
@@ -189,6 +197,8 @@ class NERD:
         ac_wait_before_measurement = self.config["ac_wait_before_measurement_s"]
 
         reverse_polarity_mode = self.config["reverse_polarity"]
+
+        end_test_if_all_failed = self.config["end_test_if_all_failed"]
 
         # set up state machine #############################################################
 
@@ -221,7 +231,11 @@ class NERD:
         cycles_completed = 0
         ac_paused = False  # indicated if cycling is currently paused (for measurement or breakdown detection)
         imgs = None
+        res_imgs = None
         outlier_prev = np.array([False] * self.n_deas)
+        dea_state_vis = None
+        strain = None
+        center_shifts = None
 
         # record start time
         now = time.perf_counter()
@@ -393,8 +407,8 @@ class NERD:
                     dea_state_el = dea_state_el_new
 
             # terminate if it's the second cycle after last DEA has failed
-
-            if all(el_state == 0 for el_state in dea_state_el_new) and not breakdown_occurred and not measurement_due:
+            all_failed = all(el_state == 0 for el_state in dea_state_el_new)
+            if all_failed and end_test_if_all_failed and not breakdown_occurred and not measurement_due:
                 self.logging.info("All DEAs have failed. NERD test will be terminated")
                 self.shutdown_flag = 1  # shutdown after all samples failed
 
@@ -418,29 +432,30 @@ class NERD:
                         leakage_buf.append(leakage_current)  # append to buffer so we can average when we write the data
 
                 # capture images
-                imgs = self.image_cap.read_images()  # get one set of images
-                # check if there are outliers (large image deviation) and try to recapture
-                # if it's due to a glitch, we can hopefully get a good image within a few tries
-                img_dev = self.strain_detector.get_deviation_from_reference(imgs)
-                outlier = np.array(img_dev) > self.strain_detector.image_deviation_threshold
-                new_outlier = np.bitwise_and(outlier, np.bitwise_not(outlier_prev))
-                if any(new_outlier):
-                    new_outlier_idx = np.nonzero(new_outlier)[0]
-                    self.logging.info("Outliers in new image set: {}".format(new_outlier_idx))
-                    for i in new_outlier_idx:
-                        counter = 0
-                        idx = int(i)  # to make sure it's a proper int and not some numpy type
-                        while outlier[idx]:
-                            imgs[idx] = self.image_cap.read_single_image(idx)
-                            dev = self.strain_detector.get_deviation_from_reference_single(imgs[idx], idx)
-                            outlier[idx] = dev > self.strain_detector.image_deviation_threshold
-                            counter += 1
-                            if counter > 5:
-                                self.logging.info("5 bad images in a row. Probably not a glitch then...")
-                                break
-                        if counter <= 5:
-                            self.logging.info("Glitched image ({}) successfully recaptured".format(idx))
-                outlier_prev = outlier
+                if self.cams_active:
+                    imgs = self.image_cap.read_images()  # get one set of images
+                    # check if there are outliers (large image deviation) and try to recapture
+                    # if it's due to a glitch, we can hopefully get a good image within a few tries
+                    img_dev = self.strain_detector.get_deviation_from_reference(imgs)
+                    outlier = np.array(img_dev) > self.strain_detector.image_deviation_threshold
+                    new_outlier = np.logical_and(outlier, np.logical_not(outlier_prev))
+                    if any(new_outlier):
+                        new_outlier_idx = np.nonzero(new_outlier)[0]
+                        self.logging.info("Outliers in new image set: {}".format(new_outlier_idx))
+                        for i in new_outlier_idx:
+                            counter = 0
+                            idx = int(i)  # to make sure it's a proper int and not some numpy type
+                            while outlier[idx]:
+                                imgs[idx] = self.image_cap.read_single_image(idx)
+                                dev = self.strain_detector.get_deviation_from_reference_single(imgs[idx], idx)
+                                outlier[idx] = dev > self.strain_detector.image_deviation_threshold
+                                counter += 1
+                                if counter > 5:
+                                    self.logging.info("5 bad images in a row. Probably not a glitch then...")
+                                    break
+                            if counter <= 5:
+                                self.logging.info("Glitched image ({}) successfully recaptured".format(idx))
+                    outlier_prev = outlier
 
                 # record time spent at high voltage
                 V_high = abs(measured_voltage - max_voltage) < 50  # 50 V margin around max voltage counts as high
@@ -543,8 +558,11 @@ class NERD:
                         hb_current_output_mode = Switchboard.MODE_DC  # set back to positive DC
                         self.logging.info("Setting H-bridge output to positive DC (normal polarity)")
                     # when switching polarity, first turn off to avoid exposing sample to overshoot
-                    self.hvps.set_HB_mode(Switchboard.MODE_OFF)
-                    self.hvps.wait_until_stable()  # wait until voltage is stable before switching back on in reverse
+                    # actually, don't do this! Switching directly causes a drop rather than an overshoot.
+                    # If switching to 'off' first, the resulting drop when switching back on will be larger
+                    # and there may be overshoot
+                    # self.hvps.set_HB_mode(Switchboard.MODE_OFF)
+                    # self.hvps.wait_until_stable()  # wait until voltage is stable before switching back on in reverse
                     self.hvps.set_HB_mode(hb_current_output_mode)
 
                 # --- resume cycling if in AC mode -------------------------------------
@@ -559,34 +577,37 @@ class NERD:
                 # measurement interval)
                 time_last_measurement = time.perf_counter()
 
+                # apply selection to electrical state so it gets associated with the right DEA
+                dea_state_el_selection = [dea_state_el[i] for i in self.active_dea_indices]
+
                 # ------------------------------
                 # Analyze data: images/strain, ... (current and resistance needs no analysis) TODO: partial discharge
                 # ------------------------------
 
-                # compile labels to print on the result images (showing voltage and resistance)
-                label = "{}V".format(measured_voltage)
-                if leakage_cur_avg is not None:
-                    label += "  {}nA".format(round(leakage_cur_avg * 10000000000) / 10)  # convert to nA with 1 decimal
-                if Rdea is not None:
-                    R_kohm = np.round(Rdea / 100) / 10  # convert to kOhm with one decimal place
-                    res_img_labels = [label + "  {}kOhm".format(r) for r in R_kohm]
-                else:
-                    res_img_labels = [label] * self.n_deas
+                if self.cams_active:
+                    # compile labels to print on the result images (showing voltage and resistance)
+                    label = "{}V".format(measured_voltage)
+                    if leakage_cur_avg is not None:
+                        label += "  {}nA".format(round(leakage_cur_avg * 10000000000) / 10)  # as nA with 1 decimal
+                    if Rdea is not None:
+                        R_kohm = np.round(Rdea / 100) / 10  # convert to kOhm with one decimal place
+                        res_img_labels = [label + "  {}kOhm".format(r) for r in R_kohm]
+                    else:
+                        res_img_labels = [label] * self.n_deas
 
-                # retrieve the images that were grabbed earlier
-                # imgs = self.image_cap.retrieve_images()[1]  # no longer doing grab and retrieve separately
-                # measure strain and get result images
-                strain_res = self.strain_detector.get_dea_strain(imgs, True, True, res_img_labels)
-                strain, center_shifts, res_imgs, dea_state_vis = strain_res
-                # print average strain for each DEA
-                self.logging.info("strain [%]: {}".format(np.reshape(strain[:, -1], (1, -1))))
+                    # retrieve the images that were grabbed earlier
+                    # imgs = self.image_cap.retrieve_images()[1]  # no longer doing grab and retrieve separately
+                    # measure strain and get result images
+                    strain_res = self.strain_detector.get_dea_strain(imgs, True, True, res_img_labels)
+                    strain, center_shifts, res_imgs, dea_state_vis = strain_res
+                    # print average strain for each DEA
+                    self.logging.info("strain [%]: {}".format(np.reshape(strain[:, -1], (1, -1))))
 
-                if 0 in dea_state_vis:  # 0 means outlier, 1 means OK
-                    self.logging.warning("Outlier detected")
+                    if 0 in dea_state_vis:  # 0 means outlier, 1 means OK
+                        self.logging.warning("Outlier detected")
 
-                dea_state_el_selection = [dea_state_el[i] for i in self.active_dea_indices]
-                for img, v, e in zip(res_imgs, dea_state_vis, dea_state_el_selection):
-                    StrainDetection.draw_state_visualization(img, v, e)
+                    for img, v, e in zip(res_imgs, dea_state_vis, dea_state_el_selection):
+                        StrainDetection.draw_state_visualization(img, v, e)
 
                 # ------------------------------
                 # Save all data voltage and DEA state
@@ -612,7 +633,7 @@ class NERD:
                 # -----------------------
                 # save images
                 # -----------------------
-                if image_due:
+                if image_due and self.cams_active:
                     # get image name suffix
                     suffix = "{}V".format(measured_voltage)  # store voltage in file name
 
@@ -628,7 +649,7 @@ class NERD:
                                        preview_image_size,
                                        interpolation=cv.INTER_AREA)] * 6
                 for idx in range(self.n_deas):
-                    if len(res_imgs) > idx and res_imgs[idx] is not None:
+                    if res_imgs is not None and len(res_imgs) > idx and res_imgs[idx] is not None:
                         disp_imgs[self.active_dea_indices[idx]] = cv.resize(res_imgs[idx],
                                                                             preview_image_size,
                                                                             interpolation=cv.INTER_AREA)

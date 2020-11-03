@@ -269,7 +269,7 @@ class SetupDialog(QtWidgets.QDialog):
         self.btn_capture = QtWidgets.QPushButton("Take new image")
         self.btn_capture.clicked.connect(self.btnCaptureClicked)
 
-        # button to take new images
+        # checkbox to show strain measurement
         self.chkStrain = QtWidgets.QCheckBox("Show strain")
         self.chkStrain.setEnabled(False)  # only enable once a strain reference has been set
         self.chkStrain.clicked.connect(self.btnCaptureClicked)
@@ -290,6 +290,13 @@ class SetupDialog(QtWidgets.QDialog):
         self.lblStrainRef = QtWidgets.QLabel("No strain reference set!")
         self.lblStrainRef.setStyleSheet("QLabel { color : red }")
 
+        # checkbox to end test when all samples have died
+        self.chk_end_test_if_all_failed = QtWidgets.QCheckBox("End test if all samples have failed")
+        if "end_test_if_all_failed" in self._defaults:
+            self.chk_end_test_if_all_failed.setChecked(self._defaults["end_test_if_all_failed"])
+        else:
+            self.chk_end_test_if_all_failed.setChecked(True)  # enable by default
+
         buttonLay = QtWidgets.QHBoxLayout()
         buttonLay.setAlignment(Qt.AlignLeft)
         buttonLay.addWidget(self.btn_capture)
@@ -303,6 +310,8 @@ class SetupDialog(QtWidgets.QDialog):
         buttonLay.addWidget(self.lblStrainRef)
         buttonLay.addSpacerItem(QtWidgets.QSpacerItem(20, 1))
         buttonLay.addWidget(self.btnStart)
+        buttonLay.addSpacerItem(QtWidgets.QSpacerItem(20, 1))
+        buttonLay.addWidget(self.chk_end_test_if_all_failed)
 
         # some GUI (layout stuff)
         # formLay = QtWidgets.QFormLayout(self)
@@ -420,8 +429,22 @@ class SetupDialog(QtWidgets.QDialog):
             self.lbl_cycles.setText("")
 
     def btnStartClicked(self):
+
+        cams_active = not any([active and cam_id < 0 for active, cam_id in zip(self.getActiveSamples(), self.getCamOrder())])
+        if not cams_active:
+            res = QtWidgets.QMessageBox.question(self, "Proceed without strain measurement?",
+                                                 "Not every active sample has a camera associated with it?\n"
+                                                 "Proceed without strain measurement?\n"
+                                                 "(Strain measurement will be disabled for all samples.)",
+                                                 QtWidgets.QMessageBox.Ok | QtWidgets.QMessageBox.Cancel,
+                                                 QtWidgets.QMessageBox.Cancel)
+            if res != QtWidgets.QMessageBox.Ok:
+                return
+            for cam_sel in self.cbb_camera_select:
+                cam_sel.setCurrentIndex(0)  # set all to "Not available"
+
         # only proceed if a strain reference has been set
-        if self._strain_detector is None:
+        if cams_active and self._strain_detector is None:
             QtWidgets.QMessageBox.warning(self, "No strain reference",
                                           "To start a measurement, please set a strain reference!",
                                           QtWidgets.QMessageBox.Ok)
@@ -605,7 +628,7 @@ class SetupDialog(QtWidgets.QDialog):
                 if selection is not None:
                     self.cbb_camera_select[i_dea].setCurrentIndex(selection + 1)  # first item is "not used"
                     self.chk_active_DEA[i_dea].setChecked(True)
-                    self.chk_active_DEA[i_dea].setEnabled(True)
+                    # self.chk_active_DEA[i_dea].setEnabled(True)
 
                 self.btnCaptureClicked()
                 return
@@ -804,14 +827,14 @@ class SetupDialog(QtWidgets.QDialog):
 
             # self.logging.debug("camera selection index for DEA {} changed to {}".format(src, idx))
             if idx_cam > 0:  # valid camera selected
-                self.chk_active_DEA[i_sender].setEnabled(True)
+                # self.chk_active_DEA[i_sender].setEnabled(True)
                 # check if another slot is using this camera (and swap if so)
                 for cb in self.cbb_camera_select:
                     if cb is not sender and cb.currentIndex() == idx_cam:
                         cb.setCurrentIndex(prev_idx)  # set to the previous selection of the sender
             else:  # "not used"
                 self.chk_active_DEA[i_sender].setChecked(False)
-                self.chk_active_DEA[i_sender].setEnabled(False)
+                # self.chk_active_DEA[i_sender].setEnabled(False)
             self._camorder = self.getCamOrder()  # update stored cam order
 
             # disable strain display because if the camera selection changes, the strain reference is no longer valid
@@ -864,7 +887,10 @@ class SetupDialog(QtWidgets.QDialog):
             if i_cam >= 0:
                 self.setImage(i_dea, images[i_img])
                 i_img += 1
-            else:
+            else:  # no camera selected
+                # if self.chk_active_DEA[i_dea].isChecked():  # if there is no image, we can't enable this channel
+                #     self.chk_active_DEA[i_dea].setChecked(False)
+                #     self.chk_active_DEA[i_dea].setEnabled(False)
                 self.setImage(i_dea, ImageCapture.ImageCapture.IMG_NOT_AVAILABLE)
 
     def setImage(self, i_dea, opencv_image, img_size=None):
@@ -932,7 +958,8 @@ class SetupDialog(QtWidgets.QDialog):
             "ac_frequency_hz": self.num_ac_frequency.value(),
             "ac_wait_before_measurement_s": self.num_ac_wait.value(),
             "reverse_polarity": self.chk_reverse_polarity.isChecked(),
-            "average_images": self.num_avg_img.value()
+            "average_images": self.num_avg_img.value(),
+            "end_test_if_all_failed": self.chk_end_test_if_all_failed.isChecked()
         }
 
         return config, self._strain_detector

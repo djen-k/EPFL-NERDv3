@@ -52,6 +52,10 @@ class ImageSaver:
                     self.logging.debug("Directory [{}] already exists".format(dir_name))
 
     def save_all(self, images=None, timestamp=None, res_images=None, suffix=None):
+
+        if not images:
+            return  # nothing to do here
+
         # make sure we have a reasonable timestamp for each image
         if timestamp is None:
             timestamp = datetime.now()

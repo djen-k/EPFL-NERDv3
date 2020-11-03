@@ -108,6 +108,17 @@ class StrainDetector:
         """
 
         n_img = len(imgs)
+
+        if n_img == 0:
+            if self._reference_ellipses is None:
+                # set empty strain reference
+                self._reference_images = []
+                self._reference_ellipses = []
+                self._reference_radii = np.zeros((0, len(self.query_angles)))
+                self._reference_centers = np.zeros((0, 2))
+                self._reference_pseudo_areas = np.zeros(0)
+            return np.zeros((0, 4)), np.zeros((0, 2)), [], []  # nothing to return
+
         # TODO: keep old masks if new masks are rubbish
         # TODO: make sure the algorithm is robust to Nones
         if self._reference_images is not None and n_img != len(self._reference_images):
