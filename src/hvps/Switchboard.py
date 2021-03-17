@@ -261,7 +261,7 @@ class Switchboard:
 
         if self.log_file is not None:
             self._write_log_file(data=None, forced=True)  # write a line of NaNs in the log file to indicate disruption
-            self.data_np_prev = None  # this makes sure that the next data coming in will be logged in the file
+            self.last_written_data_np = None  # this makes sure that the next data coming in will be logged in the file
 
         # update the number of cycles if we're in AC mode (this doesn't use serial communication)
         self.get_OC_cycles()
@@ -1106,7 +1106,7 @@ class Switchboard:
         # self.logging.debug("Saving to file: {}".format(log_to_file))
 
         self.data_prev = None
-        self.data_np_prev = None
+        self.last_written_data_np = None
         self.write_new = True
         data = None
 
@@ -1170,15 +1170,15 @@ class Switchboard:
 
         if self.log_differential:
             data_np = np.array(data[1:], dtype=float)
-            if self.data_np_prev is None:
+            if self.last_written_data_np is None:
                 self.write_new = True  # this is the first entry, definitely should be written
                 write_prev = False  # no previous entry to write
             elif forced:
                 write_prev = not self.write_new  # write previous entry if it hasn't already been written
                 self.write_new = True  # definitely write the new entry (since forced is true)
             else:
-                # check if new data is different
-                is_different = np.abs(self.data_np_prev - data_np) > self.log_differential_thresholds_np
+                # check if new data is sufficiently different from previous entry
+                is_different = np.abs(self.last_written_data_np - data_np) > self.log_differential_thresholds_np
                 data_is_different = np.any(is_different[1:])
                 time_is_different = is_different[0]
                 # check if previous data point should be logged:
@@ -1198,7 +1198,7 @@ class Switchboard:
             if self.write_new:
                 row = dict(zip(self.log_data_fields, data))
                 self.log_writer.writerow(row)
-                self.data_np_prev = data_np  # remember last data that was written so we know when it changed
+                self.last_written_data_np = data_np  # remember last data that was written so we know when it changed
             # self.logging.debug("Logger thread: Data written to file".format(len(self.voltage_buf)))
 
         self.data_prev = data  # store data so we can write it later if necessary

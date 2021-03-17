@@ -567,6 +567,8 @@ class NERD:
 
                 # --- resume cycling if in AC mode -------------------------------------
                 if ac_paused:
+                    if reverse_polarity_mode:
+                        time.sleep(0.03)  # wait 30 ms for H-bridge to switch (should be sufficient) before resuming AC cycling
                     ac_paused = False  # we're done with the measurement so pause has ended
                     self.hvps.set_OC_mode(Switchboard.MODE_AC)  # set back to AC
                     self.logging.info("Resuming AC cycling")
