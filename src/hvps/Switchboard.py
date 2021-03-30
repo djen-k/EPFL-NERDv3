@@ -13,8 +13,8 @@ import serial.tools.list_ports
 
 # from src.hvps.daqmx import *
 
-LIB_VER = "2.0"  # Version of this library
-FIRM_VER = 20  # Firmware version That this library expects to run on the HVPS
+LIB_VER = "2.0.1"  # Version of this library
+FIRM_VER = 221 # TODO: maybe change back to 20 ?  # Firmware version That this library expects to run on the HVPS
 
 
 def _assert_success(func):
@@ -110,6 +110,7 @@ class Switchboard:
         self.t_0 = None
         self.time_buf = None
         self.voltage_buf = None
+        self.current_buf = None
         self.voltage_setpoint_buf = None
         self.oc_state_buf = None
         self.hb_state_buf = None
@@ -119,9 +120,9 @@ class Switchboard:
         # only write entry if voltage changed by more than 20 V (to avoid excessive logging while voltage is stable)
         # always write one entry if time since last entry is more than 1 s
         # don't write entry for changes in OC state (since it's either 0 or 1, the difference can never be more than 1)
-        self.log_differential_thresholds_np = np.array([1, 0, 20, 0, 0, 0, 0, 0, 0, 0, 0])  # thresholds for diff log
+        self.log_differential_thresholds_np = np.array([1, 0, 20, 5, 0, 0, 0, 0, 0, 0, 0, 0])  # thresholds for diff log
         self.log_writer = None  # will be initialized if needed
-        self.log_data_fields = ["Time", "Relative time [s]", "Set voltage [V]", "Measured voltage [V]",
+        self.log_data_fields = ["Time", "Relative time [s]", "Set voltage [V]", "Measured voltage [V]", "Measured current [mA]",
                                 "OC mode", "HB mode", "Relay 1", "Relay 2", "Relay 3", "Relay 4", "Relay 5", "Relay 6"]
         self.log_lock = Lock()
 
@@ -429,6 +430,29 @@ class Switchboard:
             cast_float = -1
         return cast_float
 
+    def _cast_version(self, data):
+        """
+        Version can be:
+        x
+        x.y
+        x.y.z
+        """
+        try:
+            data = data.split(".")
+            data = [int(x) for x in data]
+        except Exception as e:
+            self.logging.warning("Failed to parse float: {}. Error: {}".format(data, e))
+            return -1
+
+        if len(data) <= 3:
+            ver = 0
+            for i in range(len(data)):
+                ver += (10 ** (2 - i)) * int(data[i])
+        else:
+            self.logging.warning("Failed to parse float: {}".format(data))
+            ver = -1
+        return ver
+
     def _parse_relay_state(self, str_state):
         if not str_state:
             self.logging.warning("Failed to parse relay state. String is empty!")
@@ -652,6 +676,24 @@ class Switchboard:
         return self._cast_int(self.send_query("QVnow"))
 
     @_assert_success
+    def get_current_current(self, from_buffer_if_available=True):
+        """
+        Read the current current from the switchboard
+        :param from_buffer_if_available: If true and if continuous voltage reading is on, the most recent value from
+        the voltage buffer is returned instead of querying the switchboard.
+        :return: The current voltage as measured by the switchboard voltage feedback.
+        """
+        if from_buffer_if_available is True and self.reading_thread.is_alive():
+            with self.buffer_lock:
+                if self.current_buf:  # check if there is anything in it
+                    v = self.current_buf[-1]
+                    self.logging.debug("Taking voltage from buffer: {}".format(v))
+                    return v
+
+        # if thread not running or nothing in buffer, take normal reading
+        return self._cast_int(self.send_query("QCur"))
+
+    @_assert_success
     def is_voltage_stable(self):
         res = self._cast_int(self.send_query("QStbl"))
         if res == 1:
@@ -717,12 +759,13 @@ class Switchboard:
         """Queries name of the board"""
         self.logging.debug("Querying firmware version")
         res = self.send_query("QVer")
-        ver = self._cast_int(res)
+        ver = self._cast_version(res)
         if ver == -1:  # cast int failed, presumably because it's the older firmware v1
             res = res.split(" ")  # in v1, it's a string in the form of "slave X" need to get the value of X
             ver = self._cast_int(res[1])
-        else:  # we're on firmware v2
-            ver += 20  # define v2 firmware to be of version 2x
+        #else:  # we're on firmware v2
+            #ver += 20  # define v2 firmware to be of version 2x
+        self.logging.debug("Version: {}".format(ver))
         return ver
 
     def get_pid_gains(self):
@@ -1081,6 +1124,7 @@ class Switchboard:
         self.t_0 = reference_time
         self.continuous_voltage_reading_flag.clear()  # reset the flag
         self.voltage_buf = deque(maxlen=self.buffer_length)  # voltage buffer
+        self.current_buf = deque(maxlen=self.buffer_length)  # voltage buffer
         self.voltage_setpoint_buf = deque(maxlen=self.buffer_length)  # relay state buffer
         self.oc_state_buf = deque(maxlen=self.buffer_length)  # relay state buffer
         self.hb_state_buf = deque(maxlen=self.buffer_length)  # relay state buffer
@@ -1117,6 +1161,7 @@ class Switchboard:
             # While Flag is not set and HVPS is connected
             # get data
             voltage = self.get_current_voltage(False)
+            current = self.get_current_current(False)
             voltage_setpoint = self.get_voltage_setpoint()
             oc_state = self.get_OC_state(False)
             hb_state = self.get_HB_state(False)
@@ -1129,6 +1174,7 @@ class Switchboard:
             with self.buffer_lock:  # acquire lock for data manipulation
                 self.time_buf.append(c_time)
                 self.voltage_buf.append(voltage)
+                self.current_buf.append(current)
                 self.voltage_setpoint_buf.append(voltage_setpoint)
                 self.oc_state_buf.append(oc_state)
                 self.hb_state_buf.append(hb_state)
@@ -1140,7 +1186,7 @@ class Switchboard:
                 if relay_state is None:
                     relay_state = [None] * 6  # make sure we have a list we can expand into 6 values
                 # gather data. only log OC and HB mode [off, DC+, DC-, AC], not the actual state
-                data = [datetime.now(), c_time, voltage_setpoint, voltage, oc_state[0], hb_state[0], *relay_state]
+                data = [datetime.now(), c_time, voltage_setpoint, voltage, current, oc_state[0], hb_state[0], *relay_state]
                 self._write_log_file(data)
 
         self.logging.info("Logger thread exiting")
@@ -1214,6 +1260,7 @@ class Switchboard:
         with self.buffer_lock:  # Get Data lock for multi threading
             times = np.array(self.time_buf)  # convert to array (creates a copy)
             voltages = np.array(self.voltage_buf)  # convert to array (creates a copy)
+            currents = np.array(self.current_buf)  # convert to array (creates a copy)
             voltage_sps = np.array(self.voltage_setpoint_buf)  # convert to array (creates a copy)
             relay_states = np.array(self.relay_state_buf)  # convert to array (creates a copy)
             oc_states = np.array(self.oc_state_buf)  # convert to array (creates a copy)
@@ -1221,6 +1268,7 @@ class Switchboard:
             if clear_buffer:
                 self.time_buf.clear()
                 self.voltage_buf.clear()
+                self.current_buf.clear()
                 self.voltage_setpoint_buf.clear()
                 self.oc_state_buf.clear()
                 self.hb_state_buf.clear()
@@ -1229,7 +1277,7 @@ class Switchboard:
         if initial_t is not None:
             times = times - times[0] + initial_t  # shift starting time to the specified initial time
 
-        return times, voltages, voltage_sps, relay_states, oc_states, hb_states  # Return time and positions
+        return times, voltages, voltage_sps, currents, relay_states, oc_states, hb_states  # Return time and positions
 
 
 def test_slow_voltage_rise():

@@ -249,7 +249,14 @@ class NERD:
         duration_at_max_V = 0
 
         # TODO: check PID gains
-        self.hvps.set_pid_gains((0.15, 1.0, 0.0))  # make sure we're using the correct gains to avoid voltage spikes
+        print(self.hvps.maximum_voltage)
+        if self.hvps.maximum_voltage < 1000:
+             #we have probably the 500V version which has different PID coefficients as the 5kV version
+             self.logging.info("Setting PID for switchboard: 0.8, 25, 0")
+             self.hvps.set_pid_gains((0.8, 25.0, 0.0))  # make sure we're using the correct gains to avoid voltage spikes
+        else:
+            self.logging.info("Setting PID for switchboard: 0.15, 1, 0")
+            self.hvps.set_pid_gains((0.15, 1.0, 0.0))  # make sure we're using the correct gains to avoid voltage spikes
         # self.hvps.set_pid_gains((0.2, 1.0, 0.005))  # make sure we're using the correct gains to avoid voltage spikes
 
         self.hvps.set_HB_mode(1)
@@ -281,7 +288,7 @@ class NERD:
                     msg = "waiting low: {:.0f}/{}s".format(dt_state_change, duration_low_s)
                     self.logging.info(msg)
                 elif current_state == STATE_RAMP:
-                    msg = "Step {}/{}, current voltage: {} V, next step in {:.0f}/{} s"
+                    msg = "Step {}/{}, Vset: {} V, next step in {:.0f}/{} s"
                     msg = msg.format(current_step, nsteps, current_target_voltage, dt_state_change, step_duration_s)
                     self.logging.info(msg)
                 elif current_state == STATE_WAITING_HIGH:
@@ -505,7 +512,7 @@ class NERD:
                 # All measurements are fail-safe so the test keeps running even if an instrument fails permanently
 
                 self.logging.info("Taking new measurement:")
-                self.logging.info("Current voltage: {} V".format(measured_voltage))
+                self.logging.info("Measured voltage: {} V".format(measured_voltage))
                 self.logging.info("DEA state: {}".format(dea_state_el))
 
                 if self.daq is not None:  # perform electrical measurements if possible
@@ -610,7 +617,6 @@ class NERD:
 
                     for img, v, e in zip(res_imgs, dea_state_vis, dea_state_el_selection):
                         StrainDetection.draw_state_visualization(img, v, e)
-
                 # ------------------------------
                 # Save all data voltage and DEA state
                 # ------------------------------
